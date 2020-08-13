@@ -7,42 +7,51 @@ import (
 
 	"github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
-	"github.com/openshift/osde2e/pkg/common/alert"
 	"github.com/openshift/osde2e/pkg/common/helper"
 	velerov1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/util/errors"
 )
 
-var veleroOperatorTestName string = "[Suite: operators] [OSD] Managed Velero Operator"
-
-func init() {
-	alert.RegisterGinkgoAlert(veleroOperatorTestName, "SD-SREP", "Christoph Blecker", "sd-cicd-alerts", "sd-cicd@redhat.com", 4)
-}
-
-var _ = ginkgo.Describe(veleroOperatorTestName, func() {
+var _ = ginkgo.Describe("[Suite: operators] [OSD] Managed Velero Operator", func() {
 	var operatorName = "managed-velero-operator"
 	var operatorNamespace string = "openshift-velero"
 	var operatorLockFile string = "managed-velero-operator-lock"
 	var defaultDesiredReplicas int32 = 1
+	var clusterRoles = []string{
+		"managed-velero-operator",
+	}
+	var clusterRoleBindings = []string{
+		"managed-velero-operator",
+		"velero",
+	}
 	h := helper.New()
-
-	// NOTE: As this is deployed by OLM now, RBAC objects (ClusterRoles, ClusterRoleBindings, and the primary
-	// RoleBinding) have random-ish names like:
-	// managed-velero-operator.v0.2.196-2b128e8-5df7c76948
-	//
-	// Test need to incorporate a regex-like test?
-
 	checkConfigMapLockfile(h, operatorNamespace, operatorLockFile)
 	checkDeployment(h, operatorNamespace, operatorName, defaultDesiredReplicas)
 	checkDeployment(h, operatorNamespace, "velero", defaultDesiredReplicas)
-	checkRole(h, "kube-system", []string{"cluster-config-v1-reader"})
+	checkClusterRoles(h, clusterRoles)
+	checkClusterRoleBindings(h, clusterRoleBindings)
 	checkRoleBindings(h,
-		"kube-system",
-		[]string{"managed-velero-operator-cluster-config-v1-reader"})
+		operatorNamespace,
+		[]string{"managed-velero-operator"})
 	checkVeleroBackups(h)
+
+	ginkgo.It("Access should be forbidden to edit Backup", func() {
+		h.SetServiceAccount("system:serviceaccount:%s:dedicated-admin-project")
+		
+		backup := velerov1.Backup{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: "dedicated-admin-failure-test",
+			},
+		}
+		_, err := h.Velero().VeleroV1().Backups(h.CurrentProject()).Create(context.TODO(), &backup)
+		Expect(apierrors.IsForbidden(err)).To(BeTrue())
+	})
+})
+
 })
 
 func checkVeleroBackups(h *helper.H) {
