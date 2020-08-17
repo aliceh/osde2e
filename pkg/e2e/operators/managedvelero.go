@@ -13,7 +13,6 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/apimachinery/pkg/util/errors"
 )
 
 var _ = ginkgo.Describe("[Suite: operators] [OSD] Managed Velero Operator", func() {
@@ -41,7 +40,7 @@ var _ = ginkgo.Describe("[Suite: operators] [OSD] Managed Velero Operator", func
 
 	ginkgo.It("Access should be forbidden to edit Backup", func() {
 		h.SetServiceAccount("system:serviceaccount:%s:dedicated-admin-project")
-		
+
 		backup := velerov1.Backup{
 			ObjectMeta: metav1.ObjectMeta{
 				Name: "dedicated-admin-failure-test",
@@ -50,8 +49,6 @@ var _ = ginkgo.Describe("[Suite: operators] [OSD] Managed Velero Operator", func
 		_, err := h.Velero().VeleroV1().Backups(h.CurrentProject()).Create(context.TODO(), &backup)
 		Expect(apierrors.IsForbidden(err)).To(BeTrue())
 	})
-})
-
 })
 
 func checkVeleroBackups(h *helper.H) {
