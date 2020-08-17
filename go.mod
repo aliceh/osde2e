@@ -6,12 +6,12 @@ require (
 	github.com/Masterminds/semver v1.5.0
 	github.com/PuerkitoBio/goquery v1.5.1
 	github.com/adamliesko/retry v0.0.0-20200123222335-86c8baac277d
-	github.com/aws/aws-sdk-go v1.29.17
+	github.com/aws/aws-sdk-go v1.34.6
 	github.com/bmizerany/perks v0.0.0-20141205001514-d9a9656a3a4b // indirect
 	github.com/code-ready/crc v1.10.0
 	github.com/dgryski/go-gk v0.0.0-20200319235926-a69029f61654 // indirect
 	github.com/dgryski/go-lttb v0.0.0-20180810165845-318fcdf10a77 // indirect
-	github.com/emicklei/go-restful v2.9.6+incompatible
+	github.com/emicklei/go-restful v2.13.0+incompatible
 	github.com/ghodss/yaml v1.0.0
 	github.com/google/go-github/v31 v31.0.0
 	github.com/google/uuid v1.1.1
@@ -19,7 +19,7 @@ require (
 	github.com/hpcloud/tail v1.0.0
 	github.com/influxdata/tdigest v0.0.1 // indirect
 	github.com/kylelemons/godebug v1.1.0
-	github.com/markbates/pkger v0.16.0
+	github.com/markbates/pkger v0.17.0
 	github.com/onsi/ginkgo v1.13.0
 	github.com/onsi/gomega v1.10.1
 	github.com/openshift-online/ocm-sdk-go v0.1.105

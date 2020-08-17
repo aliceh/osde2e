@@ -9,6 +9,7 @@ import (
 	. "github.com/onsi/gomega"
 	"github.com/openshift/osde2e/pkg/common/helper"
 	velerov1 "github.com/vmware-tanzu/velero/pkg/apis/velero/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
