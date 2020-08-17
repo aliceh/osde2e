@@ -785,6 +785,8 @@ github.com/vishvananda/netlink v1.0.0/go.mod h1:+SR5DhBJrl6ZM7CoCKvpw5BKroDKQ+PJ
 github.com/vishvananda/netns v0.0.0-20191106174202-0a2b9b5464df/go.mod h1:JP3t17pCcGlemwknint6hfoeCVQrEMVwxRLRjXpq+BU=
 github.com/vmware-tanzu/velero v1.4.0 h1:wHzmpQCGjsV8ju8ufIxrpiTVrTZdv2XuvF21LYENDCk=
 github.com/vmware-tanzu/velero v1.4.0/go.mod h1:mzamYwVXIiP1pryDaiVxcQyRcbtaObFWyPgYDGwXcZ0=
+github.com/vmware-tanzu/velero v1.4.2 h1:8dtOHbUQNCn1ELfEF380dc1itEZ0S98sVxqsznKmDpw=
+github.com/vmware-tanzu/velero v1.4.2/go.mod h1:mzamYwVXIiP1pryDaiVxcQyRcbtaObFWyPgYDGwXcZ0=
 github.com/vmware/govmomi v0.22.2/go.mod h1:Y+Wq4lst78L85Ge/F8+ORXIWiKYqaro1vhAulACy9Lc=
 github.com/vmware/vmw-guestinfo v0.0.0-20170707015358-25eff159a728/go.mod h1:x9oS4Wk2s2u4tS29nEaDLdzvuHdB19CvSGJjPgkZJNk=
 github.com/xanzy/go-gitlab v0.15.0/go.mod h1:8zdQa/ri1dfn8eS3Ir1SyfvOKlw7WBJ8DVThkpGiXrs=
