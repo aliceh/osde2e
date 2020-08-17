@@ -39,12 +39,12 @@ require (
 	github.com/streadway/quantile v0.0.0-20150917103942-b0c588724d25 // indirect
 	github.com/tsenart/go-tsz v0.0.0-20180814235614-0bd30b3df1c3 // indirect
 	github.com/tsenart/vegeta v12.7.0+incompatible
-	github.com/vmware-tanzu/velero v1.4.0
+	github.com/vmware-tanzu/velero v1.4.1-0.20200813160915-c663ce15ab46
 	golang.org/x/net v0.0.0-20200421231249-e086a090c8fd
 	k8s.io/api v0.18.4
 	k8s.io/apimachinery v0.18.4
 	k8s.io/client-go v11.0.1-0.20191029005444-8e4128053008+incompatible
-	k8s.io/utils v0.0.0-20200324210504-a9aa75ae1b89
+	k8s.io/utils v0.0.0-20200324210504-a9aa75ae1b89 
 )
 
 replace (
@@ -53,4 +53,5 @@ replace (
 	k8s.io/client-go => k8s.io/client-go v0.18.4
 	sigs.k8s.io/controller-runtime => sigs.k8s.io/controller-runtime v0.5.1-0.20200414221803-bac7e8aaf90a
 	sigs.k8s.io/structured-merge-diff => sigs.k8s.io/structured-merge-diff v1.0.1-0.20191108220359-b1b620dd3f06
+	k8s.io/api => k8s.io/api v0.18.4
 )
