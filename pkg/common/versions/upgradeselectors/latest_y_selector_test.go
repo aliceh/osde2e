@@ -44,12 +44,11 @@ func TestLatestYVersionSelectVersion(t *testing.T) {
 				AvailableVersions([]*spi.Version{
 					spi.NewVersionBuilder().Version(semver.MustParse("4.1.0")).Build(),
 					spi.NewVersionBuilder().Version(semver.MustParse("4.2.0")).AvailableUpgrades(map[*semver.Version]bool{
-						semver.MustParse("4.2.2"):                             true,
-						semver.MustParse("4.2.4"):                             true,
-						semver.MustParse("4.3.0"):                             true,
-						semver.MustParse("4.3.2"):                             true,
 						semver.MustParse("4.3.0-0.nightly-2020-10-31-200727"): true,
-						semver.MustParse("4.3.0-0.nightly-2020-11-01-123456"): true,
+						semver.MustParse("4.3.0-0.nightly-2020-11-01-200727"): true,
+						semver.MustParse("4.3.0-0.nightly-2020-10-31-200727"): true,
+						semver.MustParse("4.3.0-0.nightly-2020-11-02-200727"): true,
+						semver.MustParse("4.3.0-0.nightly-2020-11-02-423456"): true,
 					}).Build(),
 					spi.NewVersionBuilder().Default(true).Version(semver.MustParse("4.3.0")).AvailableUpgrades(map[*semver.Version]bool{
 						semver.MustParse("4.3.2"): true,
@@ -60,7 +59,7 @@ func TestLatestYVersionSelectVersion(t *testing.T) {
 					spi.NewVersionBuilder().Version(semver.MustParse("4.5.0")).Build(),
 				}).
 				Build(),
-			expectedVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.3.0-0.nightly-2020-11-01-123456")).Build(),
+			expectedVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.3.0-0.nightly-2020-11-02-423456")).Build(),
 		},
 		{
 			name:           "get latest y version out of order",
@@ -83,6 +82,72 @@ func TestLatestYVersionSelectVersion(t *testing.T) {
 				}).
 				Build(),
 			expectedVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.3.0")).Build(),
+		},
+		{
+			name:           "get latest version from candidate channel",
+			installVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.2.0-candidate")).Build(),
+			versions: spi.NewVersionListBuilder().
+				AvailableVersions([]*spi.Version{
+					spi.NewVersionBuilder().Version(semver.MustParse("4.4.0-candidate")).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.2.0-candidate")).AvailableUpgrades(map[*semver.Version]bool{
+						semver.MustParse("4.2.2-candidate"): true,
+						semver.MustParse("4.2.4-candidate"): true,
+						semver.MustParse("4.3.3-candidate"): true,
+					}).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.5.0-candidate")).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.1.0-candidate")).Build(),
+					spi.NewVersionBuilder().Default(true).Version(semver.MustParse("4.3.0-candidate")).AvailableUpgrades(map[*semver.Version]bool{
+						semver.MustParse("4.3.2-candidate"): true,
+						semver.MustParse("4.3.4-candidate"): true,
+						semver.MustParse("4.4.0-candidate"): true,
+					}).Build(),
+				}).
+				Build(),
+			expectedVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.3.3-candidate")).Build(),
+		},
+		{
+			name:           "get latest feature candidate from candidate channel",
+			installVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.2.0-candidate")).Build(),
+			versions: spi.NewVersionListBuilder().
+				AvailableVersions([]*spi.Version{
+					spi.NewVersionBuilder().Version(semver.MustParse("4.4.0-candidate")).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.2.0-candidate")).AvailableUpgrades(map[*semver.Version]bool{
+						semver.MustParse("4.2.2-candidate"): true,
+						semver.MustParse("4.2.4-candidate"): true,
+						semver.MustParse("4.3.3-fc.0"):      true,
+					}).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.5.0-candidate")).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.1.0-candidate")).Build(),
+					spi.NewVersionBuilder().Default(true).Version(semver.MustParse("4.3.0-candidate")).AvailableUpgrades(map[*semver.Version]bool{
+						semver.MustParse("4.3.2-candidate"): true,
+						semver.MustParse("4.3.4-candidate"): true,
+						semver.MustParse("4.4.0-candidate"): true,
+					}).Build(),
+				}).
+				Build(),
+			expectedVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.3.3-fc.0")).Build(),
+		},
+		{
+			name:           "get latest release candidate from candidate channel",
+			installVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.2.0-candidate")).Build(),
+			versions: spi.NewVersionListBuilder().
+				AvailableVersions([]*spi.Version{
+					spi.NewVersionBuilder().Version(semver.MustParse("4.4.0-candidate")).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.2.0-candidate")).AvailableUpgrades(map[*semver.Version]bool{
+						semver.MustParse("4.2.2-candidate"): true,
+						semver.MustParse("4.2.4-candidate"): true,
+						semver.MustParse("4.3.3-rc.0"):      true,
+					}).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.5.0-candidate")).Build(),
+					spi.NewVersionBuilder().Version(semver.MustParse("4.1.0-candidate")).Build(),
+					spi.NewVersionBuilder().Default(true).Version(semver.MustParse("4.3.0-candidate")).AvailableUpgrades(map[*semver.Version]bool{
+						semver.MustParse("4.3.2-candidate"): true,
+						semver.MustParse("4.3.4-candidate"): true,
+						semver.MustParse("4.4.0-candidate"): true,
+					}).Build(),
+				}).
+				Build(),
+			expectedVersion: spi.NewVersionBuilder().Version(semver.MustParse("4.3.3-rc.0")).Build(),
 		},
 		{
 			name:           "no versions",

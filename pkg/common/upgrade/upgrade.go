@@ -72,7 +72,7 @@ func RunUpgrade() error {
 			return fmt.Errorf("can't determine provider for managed upgrade: %s", err)
 		}
 		switch provider.Type() {
-		case "moa":
+		case "rosa":
 			fallthrough
 		case "ocm":
 			desired, err = TriggerManagedUpgrade(h)
@@ -134,7 +134,7 @@ func RunUpgrade() error {
 
 	metadata.Instance.SetTimeToUpgradedCluster(time.Since(upgradeStarted).Seconds())
 
-	if err = cluster.WaitForClusterReady(viper.GetString(config.Cluster.ID), nil); err != nil {
+	if err = cluster.WaitForClusterReadyPostUpgrade(viper.GetString(config.Cluster.ID), nil); err != nil {
 		return fmt.Errorf("failed waiting for cluster ready: %v", err)
 	}
 

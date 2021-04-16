@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"math"
@@ -16,31 +17,36 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hpcloud/tail"
+	junit "github.com/joshdk/go-junit"
 	vegeta "github.com/tsenart/vegeta/lib"
 
+	pd "github.com/PagerDuty/go-pagerduty"
 	"github.com/onsi/ginkgo"
 	ginkgoConfig "github.com/onsi/ginkgo/config"
 	"github.com/onsi/ginkgo/reporters"
 	"github.com/onsi/gomega"
-	. "github.com/onsi/gomega"
 	"github.com/spf13/viper"
 
+	"github.com/openshift/osde2e/pkg/common/alert"
 	"github.com/openshift/osde2e/pkg/common/aws"
 	"github.com/openshift/osde2e/pkg/common/cluster"
 	clusterutil "github.com/openshift/osde2e/pkg/common/cluster"
+	"github.com/openshift/osde2e/pkg/common/clusterproperties"
 	"github.com/openshift/osde2e/pkg/common/config"
 	"github.com/openshift/osde2e/pkg/common/events"
 	"github.com/openshift/osde2e/pkg/common/helper"
 	"github.com/openshift/osde2e/pkg/common/metadata"
+	"github.com/openshift/osde2e/pkg/common/pagerduty"
 	"github.com/openshift/osde2e/pkg/common/phase"
 	"github.com/openshift/osde2e/pkg/common/providers"
+	"github.com/openshift/osde2e/pkg/common/prow"
 	"github.com/openshift/osde2e/pkg/common/runner"
 	"github.com/openshift/osde2e/pkg/common/spi"
 	"github.com/openshift/osde2e/pkg/common/upgrade"
 	"github.com/openshift/osde2e/pkg/common/util"
 	"github.com/openshift/osde2e/pkg/debug"
 	"github.com/openshift/osde2e/pkg/e2e/routemonitors"
+	"github.com/openshift/osde2e/pkg/reporting/ginkgorep"
 )
 
 const (
@@ -74,17 +80,18 @@ var _ = ginkgo.BeforeEach(func() {
 	}
 })
 
-// Setup cluster before testing begins.
-var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
-	defer ginkgo.GinkgoRecover()
-
+// beforeSuite attempts to populate several required cluster fields (either by provisioning a new cluster, or re-using an existing one)
+// If there is an issue with provisioning, retrieving, or getting the kubeconfig, this will return `false`.
+func beforeSuite() bool {
 	// Skip provisioning if we already have a kubeconfig
 	if viper.GetString(config.Kubeconfig.Contents) == "" {
+
 		cluster, err := clusterutil.ProvisionCluster(nil)
-		events.HandleErrorWithEvents(err, events.InstallSuccessful, events.InstallFailed).ShouldNot(HaveOccurred(), "failed to setup cluster for testing")
+		events.HandleErrorWithEvents(err, events.InstallSuccessful, events.InstallFailed)
 		if err != nil {
+			log.Printf("Failed to set up or retrieve cluster: %v", err)
 			getLogs()
-			return []byte{}
+			return false
 		}
 
 		viper.Set(config.Cluster.ID, cluster.ID())
@@ -102,7 +109,9 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 		viper.Set(config.CloudProvider.Region, cluster.Region())
 		log.Printf("CLOUD_PROVIDER_REGION set to %s from OCM.", viper.GetString(config.CloudProvider.Region))
 
-		log.Printf("Found addons: %s", strings.Join(cluster.Addons(), ","))
+		if !viper.GetBool(config.Addons.SkipAddonList) || viper.GetString(config.Provider) != "mock" {
+			log.Printf("Found addons: %s", strings.Join(cluster.Addons(), ","))
+		}
 
 		metadata.Instance.SetClusterName(cluster.Name())
 		metadata.Instance.SetClusterID(cluster.ID())
@@ -112,27 +121,37 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 			log.Printf("Error while adding upgrade version property to cluster via OCM: %v", err)
 		}
 
-		err = clusterutil.WaitForClusterReady(cluster.ID(), nil)
-		events.HandleErrorWithEvents(err, events.HealthCheckSuccessful, events.HealthCheckFailed).ShouldNot(HaveOccurred(), "cluster failed health check")
-		if err != nil {
-			getLogs()
-			return []byte{}
-		}
-
-		if len(viper.GetString(config.Addons.IDs)) > 0 {
-			err = installAddons()
-			events.HandleErrorWithEvents(err, events.InstallAddonsSuccessful, events.InstallAddonsFailed).ShouldNot(HaveOccurred(), "failed while installing addons")
-			if err != nil {
+		if viper.GetString(config.Tests.SkipClusterHealthChecks) != "true" {
+			if err := clusterutil.WaitForClusterReadyPostInstall(cluster.ID(), nil); err != nil {
+				log.Printf("Cluster failed health check: %v", err)
 				getLogs()
-				return []byte{}
+				return false
+			}
+			log.Println("Cluster is healthy and ready for testing")
+		} else {
+			log.Println("Skipping health checks as requested")
+		}
+		if len(viper.GetString(config.Addons.IDs)) > 0 {
+			if viper.GetString(config.Provider) != "mock" {
+				err = installAddons()
+				events.HandleErrorWithEvents(err, events.InstallAddonsSuccessful, events.InstallAddonsFailed)
+				if err != nil {
+					log.Printf("Cluster failed installing addons: %v", err)
+					getLogs()
+					return false
+				}
+			} else {
+				log.Println("Skipping addon installation due to mock provider.")
+				log.Println("If you are running local addon tests, please ensure the addon components are already installed.")
 			}
 		}
 
 		var kubeconfigBytes []byte
 		if kubeconfigBytes, err = provider.ClusterKubeconfig(cluster.ID()); err != nil {
-			events.HandleErrorWithEvents(err, events.InstallKubeconfigRetrievalSuccess, events.InstallKubeconfigRetrievalFailure).ShouldNot(HaveOccurred(), "failed while retrieve kubeconfig")
+			events.HandleErrorWithEvents(err, events.InstallKubeconfigRetrievalSuccess, events.InstallKubeconfigRetrievalFailure)
+			log.Printf("Failed retrieving kubeconfig: %v", err)
 			getLogs()
-			return []byte{}
+			return false
 		}
 		viper.Set(config.Kubeconfig.Contents, string(kubeconfigBytes))
 
@@ -143,19 +162,12 @@ var _ = ginkgo.SynchronizedBeforeSuite(func() []byte {
 		} else {
 			log.Printf("No kubeconfig contents found, but there should be some by now.")
 		}
+		getLogs()
 	}
-	getLogs()
-	return []byte{}
-}, func(data []byte) {
-	// only needs to run once
-})
-
-// Collect logs after each test
-var _ = ginkgo.JustAfterEach(getLogs)
+	return true
+}
 
 func getLogs() {
-	defer ginkgo.GinkgoRecover()
-
 	clusterID := viper.GetString(config.Cluster.ID)
 	if provider == nil {
 		log.Println("OSD was not configured. Skipping log collection...")
@@ -185,12 +197,17 @@ func writeLogs(m map[string][]byte) {
 // installAddons installs addons onto the cluster
 func installAddons() (err error) {
 	clusterID := viper.GetString(config.Cluster.ID)
-	num, err := provider.InstallAddons(clusterID, strings.Split(viper.GetString(config.Addons.IDs), ","))
+	params := make(map[string]map[string]string)
+	strParams := viper.GetString(config.Addons.Parameters)
+	if err := json.Unmarshal([]byte(strParams), &params); err != nil {
+		return fmt.Errorf("failed unmarshalling addon parameters %s: %w", strParams, err)
+	}
+	num, err := provider.InstallAddons(clusterID, strings.Split(viper.GetString(config.Addons.IDs), ","), params)
 	if err != nil {
 		return fmt.Errorf("could not install addons: %s", err.Error())
 	}
 	if num > 0 {
-		if err = cluster.WaitForClusterReady(clusterID, nil); err != nil {
+		if err = cluster.WaitForClusterReadyPostInstall(clusterID, nil); err != nil {
 			return fmt.Errorf("failed waiting for cluster ready: %v", err)
 		}
 	}
@@ -219,12 +236,15 @@ func runGinkgoTests() error {
 
 	gomega.RegisterFailHandler(ginkgo.Fail)
 
-	dryRun := viper.GetBool(config.DryRun)
-
 	ginkgoConfig.DefaultReporterConfig.NoisySkippings = !viper.GetBool(config.Tests.SuppressSkipNotifications)
 	ginkgoConfig.GinkgoConfig.SkipString = viper.GetString(config.Tests.GinkgoSkip)
 	ginkgoConfig.GinkgoConfig.FocusString = viper.GetString(config.Tests.GinkgoFocus)
-	ginkgoConfig.GinkgoConfig.DryRun = dryRun
+	ginkgoConfig.GinkgoConfig.DryRun = viper.GetBool(config.DryRun)
+
+	if ginkgoConfig.GinkgoConfig.DryRun {
+		// Draw attention to DRYRUN as it can exist in ENV.
+		log.Println(string("\x1b[33m"), "WARNING! This is a DRY RUN. Review this state if outcome is unexpected.", string("\033[0m"))
+	}
 
 	// setup reporter
 	reportDir := viper.GetString(config.ReportDir)
@@ -249,37 +269,8 @@ func runGinkgoTests() error {
 		return fmt.Errorf("unable to create build log in report directory: %v", err)
 	}
 
-	// Save off stdout, create the build log writer.
-	stdout := os.Stdout
-	os.Stdout = buildLogWriter
-
-	// Set the logger output to the build log writer.
-	log.SetOutput(buildLogWriter)
-
-	// Restore stdout and close the build log writer at the end of this function.
-	defer func() {
-		os.Stdout = stdout
-		log.SetOutput(stdout)
-		buildLogWriter.Close()
-	}()
-
-	// Tail the build log.
-	tail, err := tail.TailFile(buildLogPath, tail.Config{
-		Follow: true,
-		Logger: tail.DiscardingLogger,
-	})
-
-	if err != nil {
-		return fmt.Errorf("unable to tail build log: %v", err)
-	}
-
-	// Write each line from the build log to stdout.
-	go func() {
-		for line := range tail.Lines {
-			// This can return an err, but is unlikely -- we're going to skip this check intentionally for now.
-			stdout.WriteString(line.Text + "\n")
-		}
-	}()
+	mw := io.MultiWriter(os.Stdout, buildLogWriter)
+	log.SetOutput(mw)
 
 	log.Printf("Outputting log to build log at %s", buildLogPath)
 
@@ -334,7 +325,7 @@ func runGinkgoTests() error {
 		viper.Set(config.Suffix, util.RandomStr(5))
 	}
 
-	testsPassed := runTestsInPhase(phase.InstallPhase, "OSD e2e suite")
+	testsPassed := runTestsInPhase(phase.InstallPhase, "OSD e2e suite", ginkgoConfig.GinkgoConfig.DryRun)
 	getLogs()
 	upgradeTestsPassed := true
 
@@ -345,7 +336,7 @@ func runGinkgoTests() error {
 			// create route monitors for the upgrade
 			var routeMonitorChan chan struct{}
 			closeMonitorChan := make(chan struct{})
-			if viper.GetBool(config.Upgrade.MonitorRoutesDuringUpgrade) && !dryRun {
+			if viper.GetBool(config.Upgrade.MonitorRoutesDuringUpgrade) && !ginkgoConfig.GinkgoConfig.DryRun {
 				routeMonitorChan = setupRouteMonitors(closeMonitorChan)
 				log.Println("Route Monitors created.")
 			}
@@ -360,12 +351,12 @@ func runGinkgoTests() error {
 			// test upgrade rescheduling if desired
 			if !viper.GetBool(config.Upgrade.ManagedUpgradeRescheduled) {
 				log.Println("Running e2e tests POST-UPGRADE...")
-				upgradeTestsPassed = runTestsInPhase(phase.UpgradePhase, "OSD e2e suite post-upgrade")
+				upgradeTestsPassed = runTestsInPhase(phase.UpgradePhase, "OSD e2e suite post-upgrade", ginkgoConfig.GinkgoConfig.DryRun)
 			}
 			log.Println("Upgrade rescheduled, skip the POST-UPGRADE testing")
 
 			// close route monitors
-			if viper.GetBool(config.Upgrade.MonitorRoutesDuringUpgrade) && !dryRun {
+			if viper.GetBool(config.Upgrade.MonitorRoutesDuringUpgrade) && !ginkgoConfig.GinkgoConfig.DryRun {
 				close(routeMonitorChan)
 				_ = <-closeMonitorChan
 				log.Println("Route monitors reconciled")
@@ -375,7 +366,7 @@ func runGinkgoTests() error {
 			log.Println("No Kubeconfig found from initial cluster setup. Unable to run upgrade.")
 		}
 	}
-	
+
 	if reportDir != "" {
 		if err = metadata.Instance.WriteToJSON(reportDir); err != nil {
 			return fmt.Errorf("error while writing the custom metadata: %v", err)
@@ -418,7 +409,7 @@ func runGinkgoTests() error {
 		}
 	}
 
-	if !dryRun {
+	if !ginkgoConfig.GinkgoConfig.DryRun {
 		getLogs()
 
 		h := helper.NewOutsideGinkgo()
@@ -436,6 +427,63 @@ func runGinkgoTests() error {
 	}
 
 	return nil
+}
+
+func openPDAlerts(suites []junit.Suite, jobName, jobURL string) {
+	pdc := pagerduty.Config{
+		IntegrationKey: viper.GetString(config.Alert.PagerDutyAPIToken),
+	}
+	failingTests := []string{}
+	for _, suite := range suites {
+	inner:
+		for _, testcase := range suite.Tests {
+			if testcase.Status != junit.StatusFailed {
+				continue inner
+			}
+			failingTests = append(failingTests, testcase.Name)
+		}
+	}
+	jobDetails := map[string]string{
+		"details":        jobURL,
+		"clusterID":      viper.GetString(config.Cluster.ID),
+		"clusterName":    viper.GetString(config.Cluster.Name),
+		"clusterVersion": viper.GetString(config.Cluster.Version),
+		"expiration":     "clusters expire 6 hours after creation",
+	}
+	// if too many things failed, open a single alert that isn't grouped with the others.
+	if len(failingTests) > 10 {
+		jobDetails["help"] = "This is likely a more complex problem, like a test harness or infrastructure issue. The test harness will attempt to notify #sd-cicd"
+		if event, err := pdc.FireAlert(pd.V2Payload{
+			Summary:  "A lot of tests failed together",
+			Severity: "info",
+			Source:   jobName,
+			Group:    "", // do not group
+			Details:  jobDetails,
+		}); err != nil {
+			log.Printf("Failed creating pagerduty incident for failure: %v", err)
+		} else {
+			if err := alert.SendSlackMessage("sd-cicd", fmt.Sprintf(`@osde2e A bunch of tests failed at once:
+pipeline: %s
+URL: %s
+PD info: %v`, jobName, jobURL, event)); err != nil {
+				log.Printf("Failed sending slack message to CICD team: %v", err)
+			}
+		}
+		return
+	}
+	// open an alert for each failing test
+	for _, name := range failingTests {
+		if _, err := pdc.FireAlert(pd.V2Payload{
+			Summary:  name + " failed",
+			Severity: "info",
+			Source:   jobName,
+			Group:    name, // group by test case
+			Details:  jobDetails,
+		}); err != nil {
+			log.Printf("Failed creating pagerduty incident for failure: %v", err)
+		}
+	}
+	return
 }
 
 func cleanupAfterE2E(h *helper.H) (errors []error) {
@@ -466,6 +514,9 @@ func cleanupAfterE2E(h *helper.H) (errors []error) {
 
 	log.Print("Gathering Test Project State...")
 	h.InspectState()
+
+	log.Print("Gathering OLM State...")
+	h.InspectOLM()
 
 	log.Print("Gathering Cluster State...")
 	clusterState := h.GetClusterState()
@@ -508,6 +559,14 @@ func cleanupAfterE2E(h *helper.H) (errors []error) {
 		if err != nil {
 			log.Printf("error getting Cluster state: %s", err.Error())
 		} else {
+			defer func() {
+				// set the completed property right before this function returns, which should be after
+				// all cleanup is finished.
+				err = provider.AddProperty(cluster, clusterproperties.Status, clusterproperties.StatusCompleted)
+				if err != nil {
+					log.Printf("Failed setting completed status: %v", err)
+				}
+			}()
 			log.Printf("Cluster addons: %v", cluster.Addons())
 			log.Printf("Cluster cloud provider: %v", cluster.CloudProvider())
 			log.Printf("Cluster expiration: %v", cluster.ExpirationTimestamp())
@@ -539,11 +598,23 @@ func cleanupAfterE2E(h *helper.H) (errors []error) {
 	// We need to clean up our helper tests manually.
 	h.Cleanup()
 
+	// We need a provider to hibernate
+	// We need a cluster to hibernate
+	// We need to check that the test run wants to hibernate after this run
+	/*
+		if provider != nil && viper.GetString(config.Cluster.ID) != "" && viper.GetBool(config.Cluster.HibernateAfterUse) {
+			msg := "Unable to hibernate %s"
+			if provider.Hibernate(viper.GetString(config.Cluster.ID)) {
+				msg = "Hibernating %s"
+			}
+			log.Printf(msg, viper.GetString(config.Cluster.ID))
+		}
+	*/
 	return errors
 }
 
 // nolint:gocyclo
-func runTestsInPhase(phase string, description string) bool {
+func runTestsInPhase(phase string, description string, dryrun bool) bool {
 	viper.Set(config.Phase, phase)
 	reportDir := viper.GetString(config.ReportDir)
 	phaseDirectory := filepath.Join(reportDir, phase)
@@ -555,8 +626,15 @@ func runTestsInPhase(phase string, description string) bool {
 	}
 	suffix := viper.GetString(config.Suffix)
 	phaseReportPath := filepath.Join(phaseDirectory, fmt.Sprintf("junit_%v.xml", suffix))
-	phaseReporter := reporters.NewJUnitReporter(phaseReportPath)
+	phaseReporter := ginkgorep.NewPhaseReporter(phase, phaseReportPath)
 	ginkgoPassed := false
+
+	if !dryrun || !ginkgoConfig.GinkgoConfig.DryRun {
+		if !beforeSuite() {
+			log.Println("Error getting kubeconfig from beforeSuite function")
+			return false
+		}
+	}
 
 	// We need this anonymous function to make sure GinkgoRecover runs where we want it to
 	// and will still execute the rest of the function regardless whether the tests pass or fail.
@@ -578,41 +656,40 @@ func runTestsInPhase(phase string, description string) bool {
 		if file != nil {
 			// Process the jUnit XML result files
 			if junitFileRegex.MatchString(file.Name()) {
-				data, err := ioutil.ReadFile(filepath.Join(phaseDirectory, file.Name()))
+				suites, err := junit.IngestFile(filepath.Join(phaseDirectory, file.Name()))
 				if err != nil {
-					log.Printf("error opening junit file %s: %s", file.Name(), err.Error())
-					return false
-				}
-				// Use Ginkgo's JUnitTestSuite to unmarshal the JUnit XML file
-				var testSuite reporters.JUnitTestSuite
-
-				if err = xml.Unmarshal(data, &testSuite); err != nil {
-					log.Printf("error unmarshalling junit xml: %s", err.Error())
+					log.Printf("error reading junit xml file %s: %s", file.Name(), err.Error())
 					return false
 				}
 
-				for i, testcase := range testSuite.TestCases {
-					isSkipped := testcase.Skipped != nil
-					isFail := testcase.FailureMessage != nil
+				for _, testSuite := range suites {
+					for _, testcase := range testSuite.Tests {
+						isSkipped := testcase.Status == junit.StatusSkipped
+						isFail := testcase.Status == junit.StatusFailed
 
-					if !isSkipped {
-						numTests++
+						if !isSkipped {
+							numTests++
+						}
+						if !isFail && !isSkipped {
+							numPassingTests++
+						}
 					}
-					if !isFail && !isSkipped {
-						numPassingTests++
-					}
-
-					testSuite.TestCases[i].Name = fmt.Sprintf("[%s] %s", phase, testcase.Name)
 				}
 
-				data, err = xml.Marshal(&testSuite)
-
-				err = ioutil.WriteFile(filepath.Join(phaseDirectory, file.Name()), data, 0644)
-				if err != nil {
-					log.Printf("error writing to junit file: %s", err.Error())
-					return false
+				// fire PD incident if JOB_TYPE==periodic
+				if os.Getenv("JOB_TYPE") == "periodic" {
+					url, _ := prow.JobURL()
+					jobName := os.Getenv("JOB_NAME")
+					openPDAlerts(suites, jobName, url)
 				}
 			}
+		}
+	}
+	// If we could have opened new alerts, consolidate them
+	if os.Getenv("JOB_TYPE") == "periodic" {
+		err := pagerduty.MergeCICDIncidents(pd.NewClient(viper.GetString(config.Alert.PagerDutyUserToken)))
+		if err != nil {
+			log.Printf("Failed merging PD incidents: %v", err)
 		}
 	}
 
@@ -633,6 +710,9 @@ func runTestsInPhase(phase string, description string) bool {
 	// Ensure all log metrics are zeroed out before running again
 	metadata.Instance.ResetLogMetrics()
 
+	//Ensure all before suite metrics are zeroed out before running again
+	metadata.Instance.ResetBeforeSuiteMetrics()
+
 	for _, file := range files {
 		if logFileRegex.MatchString(file.Name()) {
 			data, err := ioutil.ReadFile(filepath.Join(reportDir, file.Name()))
@@ -643,12 +723,16 @@ func runTestsInPhase(phase string, description string) bool {
 			for _, metric := range config.GetLogMetrics() {
 				metadata.Instance.IncrementLogMetric(metric.Name, metric.HasMatches(data))
 			}
+			for _, metric := range config.GetBeforeSuiteMetrics() {
+				metadata.Instance.IncrementBeforeSuiteMetric(metric.Name, metric.HasMatches(data))
+			}
 		}
 	}
 
 	logMetricTestSuite := reporters.JUnitTestSuite{
 		Name: "Log Metrics",
 	}
+
 	for name, value := range metadata.Instance.LogMetrics {
 		testCase := reporters.JUnitTestCase{
 			ClassName: "Log Metrics",
@@ -679,6 +763,40 @@ func runTestsInPhase(phase string, description string) bool {
 		return false
 	}
 
+	beforeSuiteMetricTestSuite := reporters.JUnitTestSuite{
+		Name: "Before Suite Metrics",
+	}
+
+	for name, value := range metadata.Instance.BeforeSuiteMetrics {
+		testCase := reporters.JUnitTestCase{
+			ClassName: "Before Suite Metrics",
+			Name:      fmt.Sprintf("[BeforeSuite] %s", name),
+			Time:      float64(value),
+		}
+
+		if config.GetBeforeSuiteMetrics().GetMetricByName(name).IsPassing(value) {
+			testCase.PassedMessage = &reporters.JUnitPassedMessage{
+				Message: fmt.Sprintf("Passed with %d matches", value),
+			}
+		} else {
+			testCase.FailureMessage = &reporters.JUnitFailureMessage{
+				Message: fmt.Sprintf("Failed with %d matches", value),
+			}
+			beforeSuiteMetricTestSuite.Failures++
+		}
+		beforeSuiteMetricTestSuite.Tests++
+
+		beforeSuiteMetricTestSuite.TestCases = append(beforeSuiteMetricTestSuite.TestCases, testCase)
+	}
+
+	newdata, err := xml.Marshal(&beforeSuiteMetricTestSuite)
+
+	err = ioutil.WriteFile(filepath.Join(phaseDirectory, "junit_beforesuite.xml"), newdata, 0644)
+	if err != nil {
+		log.Printf("error writing to junit file: %s", err.Error())
+		return false
+	}
+
 	clusterID := viper.GetString(config.Cluster.ID)
 
 	clusterState := spi.ClusterStateUnknown
@@ -691,7 +809,7 @@ func runTestsInPhase(phase string, description string) bool {
 		}
 		clusterState = cluster.State()
 	}
-	if !viper.GetBool(config.DryRun) && clusterState == spi.ClusterStateReady {
+	if !dryrun && clusterState == spi.ClusterStateReady {
 		h := helper.NewOutsideGinkgo()
 		if h == nil {
 			log.Println("Unable to generate helper outside of ginkgo")
@@ -780,6 +898,7 @@ func setupRouteMonitors(closeChannel chan struct{}) chan struct{} {
 				routeMonitors.End()
 				routeMonitors.SaveReports(viper.GetString(config.ReportDir))
 				routeMonitors.SavePlots(viper.GetString(config.ReportDir))
+				routeMonitors.ExtractData(viper.GetString(config.ReportDir))
 				routeMonitors.StoreMetadata()
 				close(closeChannel)
 				return

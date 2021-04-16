@@ -175,6 +175,12 @@ var Tests = struct {
 	// Env: SKIP_CLUSTER_HEALTH_CHECKS
 	SkipClusterHealthChecks string
 
+	// ClusterHealthChecksTimeout defines the duration for which the harness will
+	// wait for the cluster to indicate it is healthy before cancelling the test
+	// run. This value should be formatted for use with time.ParseDuration.
+	// Env: CLUSTER_HEALTH_CHECKS_TIMEOUT
+	ClusterHealthChecksTimeout string
+
 	// MetricsBucket is the bucket that metrics data will be uploaded to.
 	// Env: METRICS_BUCKET
 	MetricsBucket string
@@ -184,16 +190,17 @@ var Tests = struct {
 	ServiceAccount string
 }{
 
-	PollingTimeout:            "tests.pollingTimeout",
-	GinkgoSkip:                "tests.ginkgoSkip",
-	GinkgoFocus:               "tests.focus",
-	TestsToRun:                "tests.testsToRun",
-	SuppressSkipNotifications: "tests.suppressSkipNotifications",
-	CleanRuns:                 "tests.cleanRuns",
-	OperatorSkip:              "tests.operatorSkip",
-	SkipClusterHealthChecks:   "tests.skipClusterHealthChecks",
-	MetricsBucket:             "tests.metricsBucket",
-	ServiceAccount:            "tests.serviceAccount",
+	PollingTimeout:             "tests.pollingTimeout",
+	GinkgoSkip:                 "tests.ginkgoSkip",
+	GinkgoFocus:                "tests.focus",
+	TestsToRun:                 "tests.testsToRun",
+	SuppressSkipNotifications:  "tests.suppressSkipNotifications",
+	CleanRuns:                  "tests.cleanRuns",
+	OperatorSkip:               "tests.operatorSkip",
+	SkipClusterHealthChecks:    "tests.skipClusterHealthChecks",
+	MetricsBucket:              "tests.metricsBucket",
+	ServiceAccount:             "tests.serviceAccount",
+	ClusterHealthChecksTimeout: "tests.clusterHealthChecksTimeout",
 }
 
 // Cluster config keys.
@@ -201,6 +208,10 @@ var Cluster = struct {
 	// MultiAZ deploys a cluster across multiple availability zones.
 	// Env: MULTI_AZ
 	MultiAZ string
+
+	// Channel dictates which install/upgrade edges will be available to the cluster
+	// Env: CHANNEL
+	Channel string
 
 	// DestroyClusterAfterTest set to true if you want to the cluster to be explicitly deleted after the test.
 	// Env: DESTROY_CLUSTER
@@ -277,8 +288,22 @@ var Cluster = struct {
 
 	// NumWorkerNodes overrides the flavour's number of worker nodes specified
 	NumWorkerNodes string
+
+	// Specify a key in the pre-defined imageContentSource array in the ocmprovider
+	// Blank will default to a randomized option
+	ImageContentSource string
+
+	//InstallConfig overrides merges on top of the installer's default OCP installer config
+	// Blank will do nothing
+	// Cannot specify imageContentSources within this config
+	InstallConfig string
+
+	// HibernateAfterUse will tell the provider to attempt to hibernate the cluster after
+	// the test run, assuming the provider supports hibernation
+	HibernateAfterUse string
 }{
 	MultiAZ:                             "cluster.multiAZ",
+	Channel:                             "cluster.channel",
 	DestroyAfterTest:                    "cluster.destroyAfterTest",
 	ExpiryInMinutes:                     "cluster.expiryInMinutes",
 	AfterTestWait:                       "cluster.afterTestWait",
@@ -300,6 +325,9 @@ var Cluster = struct {
 	PreviousVersionFromDefaultFound:     "cluster.previousVersionFromDefaultFound",
 	ProvisionShardID:                    "cluster.provisionshardID",
 	NumWorkerNodes:                      "cluster.numWorkerNodes",
+	ImageContentSource:                  "cluster.imageContentSource",
+	InstallConfig:                       "cluster.installConfig",
+	HibernateAfterUse:                   "cluster.hibernateAfterUse",
 }
 
 // CloudProvider config keys.
@@ -346,6 +374,24 @@ var Addons = struct {
 	// artifacts created after test harnesses have run
 	// Env: ADDON_CLEANUP_HARNESSES
 	CleanupHarnesses string
+
+	// SlackChannel is the name of a slack channel in the CoreOS slack workspace that will
+	// receive an alert if the tests fail.
+	// Env: ADDON_SLACK_CHANNEL
+	SlackChannel string
+
+	// Parameters is a nested json object. Top-level keys should be addon
+	// IDs provided in the IDs field. The values should be objects with
+	// string key-value pairs of parameters to provide to the addon with
+	// the associated top-level ID.
+	// An example:
+	// {"AddonA": {"paramName":"paramValue"}, "AddonB": {"paramName": "paramValue"}}
+	// Env: ADDON_PARAMETERS
+	Parameters string
+
+	// SkipAddonList is a boolean to indicate whether the listing of addons has to be disabled or not.
+	// Env: SKIP_ADDON_LIST
+	SkipAddonList string
 }{
 	IDsAtCreation:    "addons.idsAtCreation",
 	IDs:              "addons.ids",
@@ -353,6 +399,9 @@ var Addons = struct {
 	TestUser:         "addons.testUser",
 	RunCleanup:       "addons.runCleanup",
 	CleanupHarnesses: "addons.cleanupHarnesses",
+	SlackChannel:     "addons.slackChannel",
+	SkipAddonList:    "addons.skipAddonlist",
+	Parameters:       "addons.parameters",
 }
 
 // Scale config keys.
@@ -388,8 +437,18 @@ var Alert = struct {
 	// SlackAPIToken is a bot slack token
 	// Env: SLACK_API_TOKEN
 	SlackAPIToken string
+
+	// PagerDutyAPIToken is a pagerduty token
+	// Env: PAGERDUTY_API_TOKEN
+	PagerDutyAPIToken string
+
+	// PagerDutyUserToken is a pagerduty token for a user account with full access to the v2 API
+	// Env: PAGERDUTY_API_TOKEN
+	PagerDutyUserToken string
 }{
-	SlackAPIToken: "alert.slackAPIToken",
+	SlackAPIToken:      "alert.slackAPIToken",
+	PagerDutyAPIToken:  "alert.pagerDutyAPIToken",
+	PagerDutyUserToken: "alert.pagerDutyUserToken",
 }
 
 func init() {
@@ -485,6 +544,9 @@ func init() {
 	viper.SetDefault(Tests.SkipClusterHealthChecks, false)
 	viper.BindEnv(Tests.OperatorSkip, "SKIP_CLUSTER_HEALTH_CHECKS")
 
+	viper.SetDefault(Tests.ClusterHealthChecksTimeout, "2h")
+	viper.BindEnv(Tests.ClusterHealthChecksTimeout, "CLUSTER_HEALTH_CHECKS_TIMEOUT")
+
 	viper.SetDefault(Tests.MetricsBucket, "osde2e-metrics")
 	viper.BindEnv(Tests.MetricsBucket, "METRICS_BUCKET")
 
@@ -494,10 +556,13 @@ func init() {
 	viper.SetDefault(Cluster.MultiAZ, false)
 	viper.BindEnv(Cluster.MultiAZ, "MULTI_AZ")
 
+	viper.SetDefault(Cluster.Channel, "stable")
+	viper.BindEnv(Cluster.Channel, "CHANNEL")
+
 	viper.SetDefault(Cluster.DestroyAfterTest, false)
 	viper.BindEnv(Cluster.DestroyAfterTest, "DESTROY_CLUSTER")
 
-	viper.SetDefault(Cluster.ExpiryInMinutes, 210)
+	viper.SetDefault(Cluster.ExpiryInMinutes, 360)
 	viper.BindEnv(Cluster.ExpiryInMinutes, "CLUSTER_EXPIRY_IN_MINUTES")
 
 	viper.SetDefault(Cluster.AfterTestWait, 60)
@@ -550,6 +615,12 @@ func init() {
 	viper.SetDefault(Cluster.NumWorkerNodes, "")
 	viper.BindEnv(Cluster.NumWorkerNodes, "NUM_WORKER_NODES")
 
+	viper.BindEnv(Cluster.ImageContentSource, "CLUSTER_IMAGE_CONTENT_SOURCE")
+	viper.BindEnv(Cluster.InstallConfig, "CLUSTER_INSTALL_CONFIG")
+
+	viper.SetDefault(Cluster.HibernateAfterUse, true)
+	viper.BindEnv(Cluster.HibernateAfterUse, "HIBERNATE_AFTER_USE")
+
 	// ----- Cloud Provider -----
 	viper.SetDefault(CloudProvider.CloudProviderID, "aws")
 	viper.BindEnv(CloudProvider.CloudProviderID, "CLOUD_PROVIDER_ID")
@@ -571,6 +642,15 @@ func init() {
 	viper.SetDefault(Addons.RunCleanup, false)
 	viper.BindEnv(Addons.RunCleanup, "ADDON_RUN_CLEANUP")
 
+	viper.SetDefault(Addons.SlackChannel, "sd-cicd-alerts")
+	viper.BindEnv(Addons.SlackChannel, "ADDON_SLACK_CHANNEL")
+
+	viper.SetDefault(Addons.Parameters, "{}")
+	viper.BindEnv(Addons.Parameters, "ADDON_PARAMETERS")
+
+	viper.SetDefault(Addons.SkipAddonList, false)
+	viper.BindEnv(Addons.SkipAddonList, "SKIP_ADDON_LIST")
+
 	// ----- Scale -----
 	viper.SetDefault(Scale.WorkloadsRepository, "https://github.com/openshift-scale/workloads")
 	viper.BindEnv(Scale.WorkloadsRepository, "WORKLOADS_REPO")
@@ -585,6 +665,13 @@ func init() {
 
 	// ----- Alert ----
 	viper.BindEnv(Alert.SlackAPIToken, "SLACK_API_TOKEN")
+	RegisterSecret(Alert.SlackAPIToken, "slack-api-token")
+
+	viper.BindEnv(Alert.PagerDutyAPIToken, "PAGERDUTY_API_TOKEN")
+	RegisterSecret(Alert.PagerDutyAPIToken, "pagerduty-api-token")
+
+	viper.BindEnv(Alert.PagerDutyUserToken, "PAGERDUTY_USER_TOKEN")
+	RegisterSecret(Alert.PagerDutyUserToken, "pagerduty-user-token")
 }
 
 // PostProcess is a variety of post-processing commands that is intended to be run after a config is loaded.

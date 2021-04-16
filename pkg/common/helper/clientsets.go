@@ -6,10 +6,13 @@ import (
 	config "github.com/openshift/client-go/config/clientset/versioned"
 	image "github.com/openshift/client-go/image/clientset/versioned"
 	project "github.com/openshift/client-go/project/clientset/versioned"
+	quotaclient "github.com/openshift/client-go/quota/clientset/versioned"
 	route "github.com/openshift/client-go/route/clientset/versioned"
+	security "github.com/openshift/client-go/security/clientset/versioned"
 	user "github.com/openshift/client-go/user/clientset/versioned"
 	machine "github.com/openshift/machine-api-operator/pkg/generated/clientset/versioned"
 	operator "github.com/operator-framework/operator-lifecycle-manager/pkg/api/client/clientset/versioned"
+	prometheusop "github.com/prometheus-operator/prometheus-operator/pkg/client/versioned"
 	velero "github.com/vmware-tanzu/velero/pkg/generated/clientset/versioned"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
@@ -36,11 +39,25 @@ func (h *H) Dynamic() dynamic.Interface {
 	return client
 }
 
+// Security returns the clientset for Security objects.
+func (h *H) Security() security.Interface {
+	client, err := security.NewForConfig(h.restConfig)
+	Expect(err).ShouldNot(HaveOccurred(), "failed to configure Security clientset")
+	return client
+}
+
 // Kube returns the clientset for Kubernetes upstream.
 func (h *H) Kube() kubernetes.Interface {
 	client, err := kubernetes.NewForConfig(h.restConfig)
 	Expect(err).ShouldNot(HaveOccurred(), "failed to configure Kubernetes clientset")
 	return client
+}
+
+// Quota returns the client for Quota operations.
+func (h *H) Quota() (*quotaclient.Clientset, error) {
+	client, err := quotaclient.NewForConfig(h.restConfig)
+	Expect(err).ShouldNot(HaveOccurred(), "failed to configure quota clientset")
+	return client, err
 }
 
 // Velero returns the clientset for Velero objects.
@@ -96,5 +113,12 @@ func (h *H) Machine() machine.Interface {
 func (h *H) REST() *rest.RESTClient {
 	client, err := rest.RESTClientFor(h.restConfig)
 	Expect(err).ShouldNot(HaveOccurred(), "failed to configure REST client")
+	return client
+}
+
+// Monitoring returns the clientset for prometheus-operator
+func (h *H) Prometheusop() prometheusop.Interface {
+	client, err := prometheusop.NewForConfig(h.restConfig)
+	Expect(err).ShouldNot(HaveOccurred(), "failed to configure Prometheus-operator clientset")
 	return client
 }

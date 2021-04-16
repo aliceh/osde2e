@@ -19,6 +19,7 @@ import (
 	"github.com/openshift/osde2e/pkg/common/config"
 	"github.com/openshift/osde2e/pkg/common/spi"
 	"github.com/spf13/viper"
+	"k8s.io/apimachinery/pkg/util/wait"
 )
 
 // IsValidClusterName validates the clustername prior to proceeding with it
@@ -92,9 +93,18 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 	nodeBuilder := &v1.ClusterNodesBuilder{}
 
 	clusterProperties, err := o.GenerateProperties()
-
 	if err != nil {
 		return "", fmt.Errorf("error generating cluster properties: %v", err)
+	}
+
+	// This skips setting install_config for any prod job OR any periodic addon job.
+	// To invoke this logic locally you will have to set JOB_TYPE to "periodic".
+	if o.Environment() != "prod" {
+		if os.Getenv("JOB_TYPE") == "periodic" && !strings.Contains(os.Getenv("JOB_NAME"), "addon") {
+			imageSource := viper.GetString(config.Cluster.ImageContentSource)
+			log.Printf("Setting imageSource: %s", imageSource)
+			clusterProperties["install_config"] = fmt.Sprintf("%s\n%s", o.ChooseImageSource(imageSource), viper.GetString(config.Cluster.InstallConfig))
+		}
 	}
 
 	newCluster := v1.NewCluster().
@@ -105,7 +115,8 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 			ID(region)).
 		MultiAZ(multiAZ).
 		Version(v1.NewVersion().
-			ID(viper.GetString(config.Cluster.Version))).
+			ID(viper.GetString(config.Cluster.Version)).
+			ChannelGroup(viper.GetString(config.Cluster.Channel))).
 		CloudProvider(v1.NewCloudProvider().
 			ID(cloudProvider)).
 		Properties(clusterProperties)
@@ -196,35 +207,99 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 }
 
 // DetermineRegion will return the region provided by configs. This mainly wraps the random functionality for use
-// by the MOA provider.
+// by the ROSA provider.
 func (o *OCMProvider) DetermineRegion(cloudProvider string) (string, error) {
 	region := viper.GetString(config.CloudProvider.Region)
 
 	// If a region is set to "random", it will poll OCM for all the regions available
 	// It then will pull a random entry from the list of regions and set the ID to that
 	if region == "random" {
-		regionsClient := o.conn.ClustersMgmt().V1().CloudProviders().CloudProvider(cloudProvider).Regions().List()
-
-		regions, err := regionsClient.Send()
-		if err != nil {
-			return "", err
-		}
-
-		for range regions.Items().Slice() {
-			regionObj := regions.Items().Slice()[rand.Intn(regions.Total())]
-			region = regionObj.ID()
-
-			if regionObj.Enabled() {
-				break
+		var regions []*v1.CloudRegion
+		// We support multiple cloud providers....
+		if cloudProvider == "aws" {
+			if viper.GetString(AWSAccessKey) == "" || viper.GetString(AWSSecretKey) == "" {
+				log.Println("Random region requested but cloud credentials not supplied. Defaulting to us-east-1")
+				return "us-east-1", nil
 			}
+			awsCredentials, err := v1.NewAWS().
+				AccessKeyID(viper.GetString(AWSAccessKey)).
+				SecretAccessKey(viper.GetString(AWSSecretKey)).
+				Build()
+			if err != nil {
+				return "", err
+			}
+
+			response, err := o.conn.ClustersMgmt().V1().CloudProviders().CloudProvider(cloudProvider).AvailableRegions().Search().Body(awsCredentials).Send()
+			if err != nil {
+				return "", err
+			}
+			regions = response.Items().Slice()
 		}
+
+		// But we don't support passing GCP credentials yet :)
+		if cloudProvider == "gcp" {
+			log.Println("Random GCP region not supported yet. Setting region to us-east1")
+			return "us-east1", nil
+		}
+
+		cloudRegion, found := ChooseRandomRegion(toCloudRegions(regions)...)
+		if !found {
+			return "", fmt.Errorf("unable to choose a random enabled region")
+		}
+
+		region = cloudRegion.ID()
 
 		log.Printf("Random region requested, selected %s region.", region)
 
 		// Update the Config with the selected random region
 		viper.Set(config.CloudProvider.Region, region)
 	}
+
 	return region, nil
+}
+
+// CloudRegion provides an interface for methods on *v1.CloudRegion so that
+// compatible types can be instantiated from tests.
+type CloudRegion interface {
+	ID() string
+	Enabled() bool
+}
+
+// ensure *v1.CloudRegion implements CloudRegion at compile time
+var _ CloudRegion = &v1.CloudRegion{}
+
+// toCloudRegions converts a slice of *v1.CloudRegion into a slice of CloudRegion.
+// This helper can be removed once generics lands in Go, as this will no longer be
+// necessary.
+func toCloudRegions(in []*v1.CloudRegion) []CloudRegion {
+	out := make([]CloudRegion, 0, len(in))
+	for i := range in {
+		out = append(out, in[i])
+	}
+	return out
+}
+
+// ChooseRandomRegion chooses a random enabled region from the provided options. Its
+// second return parameter indicates whether it was successful in finding an enabled
+// region.
+func ChooseRandomRegion(regions ...CloudRegion) (CloudRegion, bool) {
+	// remove disabled regions from consideration
+	enabledRegions := make([]CloudRegion, 0, len(regions))
+	for _, region := range regions {
+		if region.Enabled() {
+			enabledRegions = append(enabledRegions, region)
+		}
+	}
+	// randomize the order of the candidates
+	rand.Shuffle(len(enabledRegions), func(i, j int) {
+		enabledRegions[i], enabledRegions[j] = enabledRegions[j], enabledRegions[i]
+	})
+	// return the first element if the list is not empty
+	for _, regionObj := range enabledRegions {
+		return regionObj, true
+	}
+	// indicate that there were no enabled candidates
+	return nil, false
 }
 
 // DetermineMachineType will return the machine type provided by configs. This mainly wraps the random functionality for use
@@ -316,17 +391,60 @@ func (o *OCMProvider) GenerateProperties() (map[string]string, error) {
 
 // DeleteCluster requests the deletion of clusterID.
 func (o *OCMProvider) DeleteCluster(clusterID string) error {
-	var resp *v1.ClusterDeleteResponse
+	var deleteResp *v1.ClusterDeleteResponse
+	var resumeResp *v1.ClusterResumeResponse
 	var cluster *spi.Cluster
 	var err error
-	var ok bool
 
-	if cluster, ok = o.clusterCache[clusterID]; !ok {
-		cluster, err = o.GetCluster(clusterID)
-		if err != nil {
-			return fmt.Errorf("error retrieving cluster for deletion: %v", err)
+	cluster, err = o.GetCluster(clusterID)
+	if err != nil {
+		return fmt.Errorf("error retrieving cluster for deletion: %v", err)
+	}
+
+	// If the cluster is hibernating according to OCM, wake it up
+	if cluster.State() == spi.ClusterStateHibernating {
+		if err = retryer().Do(func() error {
+			var err error
+			resumeResp, err = o.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).Resume().Send()
+
+			if err != nil {
+				return fmt.Errorf("couldn't resume cluster '%s': %v", clusterID, err)
+			}
+
+			if resumeResp != nil && resumeResp.Error() != nil {
+				err = errResp(resumeResp.Error())
+				log.Printf("%v", err)
+				return err
+			}
+
+			return nil
+		}); err != nil {
+			return err
 		}
 	}
+
+	wait.PollImmediate(1*time.Minute, 15*time.Minute, func() (bool, error) {
+		// If the cluster state is anything but Hibernating or Ready, poll the state again
+		if cluster.State() == spi.ClusterStateHibernating || cluster.State() == spi.ClusterStateReady {
+			cluster, err = o.GetCluster(clusterID)
+			if err != nil {
+				log.Printf("error retrieving cluster for deletion: %v", err)
+				return false, nil
+			}
+		}
+		// A cluster errored in OCM is unlikely to recover so we should fail fast
+		if cluster.State() == spi.ClusterStateError {
+			return false, fmt.Errorf("Cluster %s is in an errored state.", cluster.ID())
+		}
+
+		// We have a ready cluster, hooray
+		if cluster.State() == spi.ClusterStateReady {
+			return true, nil
+		}
+
+		// The cluster isn't ready so we should loop again
+		return false, nil
+	})
 
 	err = o.AddProperty(cluster, clusterproperties.Status, clusterproperties.StatusUninstalling)
 	if err != nil {
@@ -335,7 +453,7 @@ func (o *OCMProvider) DeleteCluster(clusterID string) error {
 
 	err = retryer().Do(func() error {
 		var err error
-		resp, err = o.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).
+		deleteResp, err = o.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).
 			Delete().
 			Send()
 
@@ -343,8 +461,8 @@ func (o *OCMProvider) DeleteCluster(clusterID string) error {
 			return fmt.Errorf("couldn't delete cluster '%s': %v", clusterID, err)
 		}
 
-		if resp != nil && resp.Error() != nil {
-			err = errResp(resp.Error())
+		if deleteResp != nil && deleteResp.Error() != nil {
+			err = errResp(deleteResp.Error())
 			log.Printf("%v", err)
 			return err
 		}
@@ -518,7 +636,13 @@ func (o *OCMProvider) ClusterKubeconfig(clusterID string) ([]byte, error) {
 		return getLocalKubeConfig(localKubeConfig)
 	}
 
+	existingKubeConfig := viper.GetString(config.Kubeconfig.Contents)
+	if existingKubeConfig != "" {
+		return []byte(existingKubeConfig), nil
+	}
+
 	if creds, ok := o.credentialCache[clusterID]; ok {
+		viper.Set(config.Kubeconfig.Contents, creds)
 		return []byte(creds), nil
 	}
 
@@ -550,6 +674,7 @@ func (o *OCMProvider) ClusterKubeconfig(clusterID string) ([]byte, error) {
 	}
 
 	o.credentialCache[clusterID] = resp.Body().Kubeconfig()
+	viper.Set(config.Kubeconfig.Contents, resp.Body().Kubeconfig())
 
 	return []byte(resp.Body().Kubeconfig()), nil
 }
@@ -567,28 +692,15 @@ func getLocalKubeConfig(path string) ([]byte, error) {
 	return []byte(f), nil
 }
 
-// GetMetrics gathers metrics from OCM on a cluster
-func (o *OCMProvider) GetMetrics(clusterID string) (*v1.ClusterMetrics, error) {
-	var err error
-
-	clusterClient := o.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID)
-
-	cluster, err := clusterClient.Get().Send()
-	if err != nil {
-		return nil, err
-	}
-
-	return cluster.Body().Metrics(), nil
-}
-
 // InstallAddons loops through the addons list in the config
 // and performs the CRUD operation to trigger addon installation
-func (o *OCMProvider) InstallAddons(clusterID string, addonIDs []string) (num int, err error) {
+func (o *OCMProvider) InstallAddons(clusterID string, addonIDs []spi.AddOnID, addonParams map[spi.AddOnID]spi.AddOnParams) (num int, err error) {
 	num = 0
 	addonsClient := o.conn.ClustersMgmt().V1().Addons()
 	clusterClient := o.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID)
 	for _, addonID := range addonIDs {
 		var addonResp *v1.AddOnGetResponse
+		params := addonParams[addonID]
 
 		err = retryer().Do(func() error {
 			var err error
@@ -630,7 +742,17 @@ func (o *OCMProvider) InstallAddons(clusterID string, addonIDs []string) (num in
 		}
 
 		if addon.Enabled() {
-			addonInstallation, err := v1.NewAddOnInstallation().Addon(v1.NewAddOn().Copy(addon)).Build()
+			builder := v1.NewAddOnInstallation().Addon(v1.NewAddOn().Copy(addon))
+
+			if len(params) > 0 {
+				addOnParamList := make([]*v1.AddOnInstallationParameterBuilder, 0, len(params))
+				for name, value := range params {
+					addOnParamList = append(addOnParamList, v1.NewAddOnInstallationParameter().ID(name).Value(value))
+				}
+				builder = builder.Parameters(v1.NewAddOnInstallationParameterList().Items(addOnParamList...))
+			}
+
+			addonInstallation, err := builder.Build()
 			if err != nil {
 				return 0, err
 			}
@@ -698,40 +820,43 @@ func (o *OCMProvider) ocmToSPICluster(ocmCluster *v1.Cluster) (*spi.Cluster, err
 		cluster.Properties(properties)
 	}
 
-	var addonsResp *v1.AddOnInstallationsListResponse
-	err = retryer().Do(func() error {
-		var err error
-		addonsResp, err = o.conn.ClustersMgmt().V1().Clusters().Cluster(ocmCluster.ID()).Addons().
-			List().
-			Send()
+	if !viper.GetBool(config.Addons.SkipAddonList) {
+		var addonsResp *v1.AddOnInstallationsListResponse
+		err = retryer().Do(func() error {
+			var err error
+			addonsResp, err = o.conn.ClustersMgmt().V1().Clusters().Cluster(ocmCluster.ID()).Addons().
+				List().
+				Send()
+
+			if err != nil {
+				err = fmt.Errorf("couldn't retrieve addons for cluster '%s': %v", ocmCluster.ID(), err)
+				log.Printf("%v", err)
+				return err
+			}
+
+			if addonsResp != nil && addonsResp.Error() != nil {
+				log.Printf("error while trying to retrieve addons list for cluster: %v", err)
+				return errResp(resp.Error())
+			}
+
+			return nil
+		})
 
 		if err != nil {
-			err = fmt.Errorf("couldn't retrieve addons for cluster '%s': %v", ocmCluster.ID(), err)
-			log.Printf("%v", err)
-			return err
+			return nil, err
 		}
 
-		if addonsResp != nil && addonsResp.Error() != nil {
-			log.Printf("error while trying to retrieve addons list for cluster: %v", err)
-			return errResp(resp.Error())
+		if addonsResp.Error() != nil {
+			return nil, addonsResp.Error()
 		}
 
-		return nil
-	})
+		if addons, ok := addonsResp.GetItems(); ok {
+			addons.Each(func(addon *v1.AddOnInstallation) bool {
+				cluster.AddAddon(addon.ID())
+				return true
+			})
+		}
 
-	if err != nil {
-		return nil, err
-	}
-
-	if addonsResp.Error() != nil {
-		return nil, addonsResp.Error()
-	}
-
-	if addons, ok := addonsResp.GetItems(); ok {
-		addons.Each(func(addon *v1.AddOnInstallation) bool {
-			cluster.AddAddon(addon.ID())
-			return true
-		})
 	}
 
 	cluster.ExpirationTimestamp(ocmCluster.ExpirationTimestamp())
@@ -948,6 +1073,42 @@ func (o *OCMProvider) UpdateSchedule(clusterID string, version string, t time.Ti
 
 	log.Printf("Update the upgrade schedule for cluster %s to %s", clusterID, t)
 	return nil
+}
+
+// Resume resumes a cluster via OCM
+func (o *OCMProvider) Resume(id string) bool {
+	resp, err := o.conn.ClustersMgmt().V1().Clusters().Cluster(id).Resume().Send()
+
+	if err != nil {
+		err = fmt.Errorf("couldn't resume cluster '%s': %v", id, err)
+		log.Printf("%v", err)
+		return false
+	}
+
+	if resp != nil && resp.Error() != nil {
+		log.Printf("error while trying to resume cluster: %v", err)
+		return false
+	}
+
+	return true
+}
+
+// Hibernate resumes a cluster via OCM
+func (o *OCMProvider) Hibernate(id string) bool {
+	resp, err := o.conn.ClustersMgmt().V1().Clusters().Cluster(id).Hibernate().Send()
+
+	if err != nil {
+		err = fmt.Errorf("couldn't hibernate cluster '%s': %v", id, err)
+		log.Printf("%v", err)
+		return false
+	}
+
+	if resp != nil && resp.Error() != nil {
+		log.Printf("error while trying to hibernate cluster: %v", err)
+		return false
+	}
+
+	return true
 }
 
 // This assumes cluster is a resp.Body() response from an OCM update

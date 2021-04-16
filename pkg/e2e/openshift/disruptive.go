@@ -26,6 +26,7 @@ var _ = ginkgo.Describe(disruptiveTestName, func() {
 		cfg := DefaultE2EConfig
 		cfg.Suite = "openshift/disruptive"
 		cmd := cfg.Cmd()
+		h.SetServiceAccount("system:serviceaccount:%s:cluster-admin")
 
 		// setup runner
 		r := h.Runner(cmd)
@@ -38,10 +39,12 @@ var _ = ginkgo.Describe(disruptiveTestName, func() {
 		Expect(err).NotTo(HaveOccurred())
 
 		// get results
-		results, err := r.RetrieveResults()
-		Expect(err).NotTo(HaveOccurred())
+		results, err := r.RetrieveTestResults()
 
 		// write results
 		h.WriteResults(results)
+
+		// evaluate results
+		Expect(err).NotTo(HaveOccurred())
 	}, float64(e2eTimeoutInSeconds+30))
 })

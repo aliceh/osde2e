@@ -28,6 +28,11 @@ const (
 // This is a set of pre-canned configs that will always be loaded at startup.
 var defaultConfigs = []string{
 	"log-metrics",
+	"before-suite-metrics",
+	"aws-log-metrics",
+	"aws-before-suite-metrics",
+	"gcp-before-suite-metrics",
+	"gcp-log-metrics",
 }
 
 // Configs will populate viper with specified configs.

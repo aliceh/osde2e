@@ -3,9 +3,13 @@ package spi
 
 import (
 	"time"
-
-	clustersmgmtv1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
 )
+
+// AddOnID is a string used as the identifier for an addon
+type AddOnID = string
+
+// AddOnParams is a key-value store of parameters for an addon's installation
+type AddOnParams = map[string]string
 
 // Provider is the interface that must be implemented in order to provision clusters in osde2e.
 type Provider interface {
@@ -65,7 +69,7 @@ type Provider interface {
 	// OpenShift dedicated has the notion of addon installation, which users can request from
 	// the OCM API. If you wish to emulate this support, the provider will need to support a similar
 	// mechanism.
-	InstallAddons(clusterID string, addonIDs []string) (int, error)
+	InstallAddons(clusterID string, addonIDs []AddOnID, params map[AddOnID]AddOnParams) (int, error)
 
 	// Versions returns a sorted list of supported OpenShift versions.
 	//
@@ -81,7 +85,7 @@ type Provider interface {
 	Logs(clusterID string) (map[string][]byte, error)
 
 	// Metrics will get metrics relevant to the cluster from the provider.
-	Metrics(clusterID string) (*clustersmgmtv1.ClusterMetrics, error)
+	Metrics(clusterID string) (bool, error)
 
 	// Environment retrives the environment from the provider.
 	//
@@ -123,4 +127,14 @@ type Provider interface {
 
 	// DetermineMachineType selects a random machine type for a given cluster.
 	DetermineMachineType(cloudProvider string) (string, error)
+
+	// Hibernate triggers a hibernation of the cluster
+	// If hibernation is unsupported by the provider, it will log that it's unsupported
+	// but still return True.
+	Hibernate(clusterID string) bool
+
+	// Resume triggers a hibernated cluster to wake up
+	// If hibernation is unsupported by the provider, it will log that it's unsupported
+	// but still return True.
+	Resume(clusterID string) bool
 }

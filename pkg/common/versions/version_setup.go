@@ -31,6 +31,10 @@ func ChooseVersions() (err error) {
 		err = errors.New("osd must be setup when upgrading with release stream")
 	} else {
 
+		if viper.GetString(config.Cluster.ReleaseImageLatest) != "" || viper.GetString(config.Cluster.InstallSpecificNightly) != "" {
+			viper.Set(config.Cluster.Channel, "nightly")
+		}
+
 		err = wait.PollImmediate(1*time.Minute, 30*time.Minute, func() (bool, error) {
 			versionList, err = provider.Versions()
 			if err != nil {
@@ -39,6 +43,7 @@ func ChooseVersions() (err error) {
 
 			clusterVersion, versionSelector, err = setupVersion(versionList)
 			if err != nil {
+				log.Printf("Error setting up version: %s", err.Error())
 				if versionSelector == "specific image" {
 					log.Printf("Waiting for %s CIS to sync with the Release Controller", viper.GetString(config.Cluster.ReleaseImageLatest))
 					return false, nil
