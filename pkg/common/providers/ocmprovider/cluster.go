@@ -13,12 +13,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/Masterminds/semver"
 	v1 "github.com/openshift-online/ocm-sdk-go/clustersmgmt/v1"
 	"github.com/openshift/osde2e/pkg/common/aws"
 	"github.com/openshift/osde2e/pkg/common/clusterproperties"
+	viper "github.com/openshift/osde2e/pkg/common/concurrentviper"
 	"github.com/openshift/osde2e/pkg/common/config"
 	"github.com/openshift/osde2e/pkg/common/spi"
-	"github.com/spf13/viper"
 	"k8s.io/apimachinery/pkg/util/wait"
 )
 
@@ -97,14 +98,25 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 		return "", fmt.Errorf("error generating cluster properties: %v", err)
 	}
 
+	installConfig := ""
+
 	// This skips setting install_config for any prod job OR any periodic addon job.
 	// To invoke this logic locally you will have to set JOB_TYPE to "periodic".
 	if o.Environment() != "prod" {
 		if os.Getenv("JOB_TYPE") == "periodic" && !strings.Contains(os.Getenv("JOB_NAME"), "addon") {
 			imageSource := viper.GetString(config.Cluster.ImageContentSource)
-			log.Printf("Setting imageSource: %s", imageSource)
-			clusterProperties["install_config"] = fmt.Sprintf("%s\n%s", o.ChooseImageSource(imageSource), viper.GetString(config.Cluster.InstallConfig))
+			installConfig += "\n" + o.ChooseImageSource(imageSource)
+			installConfig += "\n" + o.GetNetworkConfig(viper.GetString(config.Cluster.NetworkProvider))
 		}
+	}
+
+	if viper.GetString(config.Cluster.InstallConfig) != "" {
+		installConfig += "\n" + viper.GetString(config.Cluster.InstallConfig)
+	}
+
+	if installConfig != "" {
+		log.Println("Install config:", installConfig)
+		clusterProperties["install_config"] = installConfig
 	}
 
 	newCluster := v1.NewCluster().
@@ -187,6 +199,12 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 
 	var resp *v1.ClustersAddResponse
 
+	if viper.GetBool(config.Cluster.UseExistingCluster) {
+		if clusterID := o.findRecycledCluster(cluster); clusterID != "" {
+			return clusterID, nil
+		}
+	}
+
 	err = retryer().Do(func() error {
 		var err error
 		resp, err = o.conn.ClustersMgmt().V1().Clusters().Add().
@@ -204,6 +222,70 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 		return "", fmt.Errorf("couldn't create cluster: %v", err)
 	}
 	return resp.Body().ID(), nil
+}
+
+func (o *OCMProvider) findRecycledCluster(cluster *v1.Cluster) string {
+	version := semver.MustParse(strings.TrimPrefix(cluster.Version().ID(), "openshift-"))
+	query := fmt.Sprintf("cloud_provider.id='%s' and properties.JobID='' and properties.Status like '%s%%' and version.id like 'openshift-v%s%%'",
+		cluster.CloudProvider().ID(), "completed-", version.String())
+
+	log.Println(query)
+
+	listResponse, err := o.conn.ClustersMgmt().V1().Clusters().List().Search(query).Send()
+	if err == nil && listResponse.Total() > 0 {
+		log.Printf("We've found %d matching clusters to reuse", listResponse.Total())
+		recycledCluster := listResponse.Items().Slice()[rand.Intn(listResponse.Total())]
+		spiRecycledCluster, err := o.ocmToSPICluster(recycledCluster)
+		if err != nil {
+			log.Printf("Error converting recycled cluster to an SPI Cluster: %s", err.Error())
+			return ""
+		}
+
+		err = o.AddProperty(spiRecycledCluster, clusterproperties.JobID, viper.GetString(config.JobID))
+		if err != nil {
+			log.Printf("Error adding property to cluster: %s", err.Error())
+			return ""
+		}
+
+		time.Sleep(5 * time.Second)
+
+		spiRecycledCluster, err = o.GetCluster(spiRecycledCluster.ID())
+		if err != nil {
+			log.Printf("Error retrieving cluster during job ID check: %s", err.Error())
+			return ""
+		}
+		if jobID, ok := spiRecycledCluster.Properties()["JobID"]; ok && jobID != viper.GetString(config.JobID) {
+			log.Printf("Cluster already recycled by %s", spiRecycledCluster.Properties()["JobID"])
+			return o.findRecycledCluster(cluster)
+		}
+
+		if recycledCluster.State() == v1.ClusterStateReady {
+			err = o.AddProperty(spiRecycledCluster, clusterproperties.Status, clusterproperties.StatusHealthy)
+			if err != nil {
+				log.Printf("Error adding property to cluster: %s", err.Error())
+				return ""
+			}
+			viper.Set(config.Cluster.Reused, true)
+			log.Println("Hot cluster ready, moving on...")
+
+			return recycledCluster.ID()
+		}
+		if recycledCluster.State() == "hibernating" && o.Resume(recycledCluster.ID()) {
+			log.Println("Resuming cluster to use...")
+			err = o.AddProperty(spiRecycledCluster, clusterproperties.Status, clusterproperties.StatusResuming)
+			if err != nil {
+				log.Printf("Error adding property to cluster: %s", err.Error())
+				return ""
+			}
+			viper.Set(config.Cluster.Reused, true)
+			return recycledCluster.ID()
+		}
+		log.Printf("Failed to recycle cluster %s", recycledCluster.ID())
+	}
+
+	// We couldn't resume the cluster. We'll log that we failed but continue the test with a new cluster
+	log.Println("Creating a new cluster instead")
+	return ""
 }
 
 // DetermineRegion will return the region provided by configs. This mainly wraps the random functionality for use
@@ -357,6 +439,7 @@ func (o *OCMProvider) GenerateProperties() (map[string]string, error) {
 	provisionshardID := viper.GetString(config.Cluster.ProvisionShardID)
 
 	properties := map[string]string{
+		clusterproperties.JobID:            viper.GetString(config.JobID),
 		clusterproperties.MadeByOSDe2e:     "true",
 		clusterproperties.OwnedBy:          username,
 		clusterproperties.InstalledVersion: installedversion,
@@ -877,6 +960,10 @@ func ocmStateToInternalState(state v1.ClusterState) spi.ClusterState {
 		return spi.ClusterStateReady
 	case v1.ClusterStateUninstalling:
 		return spi.ClusterStateUninstalling
+	case v1.ClusterStateHibernating:
+		return spi.ClusterStateHibernating
+	case v1.ClusterStateResuming:
+		return spi.ClusterStateResuming
 	default:
 		return spi.ClusterStateUnknown
 	}
@@ -899,6 +986,11 @@ func (o *OCMProvider) ExtendExpiry(clusterID string, hours uint64, minutes uint6
 	}
 
 	extendexpirytime := cluster.ExpirationTimestamp()
+
+	if extendexpirytime.Year() < 2000 {
+		log.Println("Cluster does not have an expiration!")
+		return nil
+	}
 
 	if hours != 0 {
 		extendexpirytime = extendexpirytime.Add(time.Duration(hours) * time.Hour).UTC()
@@ -1119,4 +1211,25 @@ func (o *OCMProvider) updateClusterCache(id string, cluster *v1.Cluster) error {
 	}
 	o.clusterCache[cluster.ID()] = c
 	return nil
+}
+
+func (o *OCMProvider) GetNetworkConfig(networkProvider string) string {
+	if networkProvider == config.DefaultNetworkProvider {
+		return ""
+	}
+	if networkProvider != "OVNKubernetes" {
+		return ""
+	}
+	return `
+networking:
+  clusterNetwork:
+  - cidr: 10.128.0.0/14
+    hostPrefix: 23
+  machineCIDR: 10.0.0.0/16
+  machineNetwork:
+  - cidr: 10.0.0.0/16
+  networkType: OVNKubernetes
+  serviceNetwork:
+  - 172.30.0.0/16
+`
 }

@@ -4,6 +4,7 @@ package e2e
 import (
 	"bytes"
 	"compress/gzip"
+	"context"
 	"encoding/json"
 	"encoding/xml"
 	"fmt"
@@ -19,13 +20,15 @@ import (
 
 	junit "github.com/joshdk/go-junit"
 	vegeta "github.com/tsenart/vegeta/lib"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	pd "github.com/PagerDuty/go-pagerduty"
 	"github.com/onsi/ginkgo"
 	ginkgoConfig "github.com/onsi/ginkgo/config"
 	"github.com/onsi/ginkgo/reporters"
 	"github.com/onsi/gomega"
-	"github.com/spf13/viper"
+	viper "github.com/openshift/osde2e/pkg/common/concurrentviper"
 
 	"github.com/openshift/osde2e/pkg/common/alert"
 	"github.com/openshift/osde2e/pkg/common/aws"
@@ -55,6 +58,10 @@ const (
 
 	// buildLog is the name of the build log file.
 	buildLog string = "test_output.log"
+
+	Success = 0
+	Failure = 1
+	Aborted = 130
 )
 
 // provisioner is used to deploy and manage clusters.
@@ -84,6 +91,7 @@ var _ = ginkgo.BeforeEach(func() {
 // If there is an issue with provisioning, retrieving, or getting the kubeconfig, this will return `false`.
 func beforeSuite() bool {
 	// Skip provisioning if we already have a kubeconfig
+	var err error
 	if viper.GetString(config.Kubeconfig.Contents) == "" {
 
 		cluster, err := clusterutil.ProvisionCluster(nil)
@@ -122,47 +130,75 @@ func beforeSuite() bool {
 		}
 
 		if viper.GetString(config.Tests.SkipClusterHealthChecks) != "true" {
-			if err := clusterutil.WaitForClusterReadyPostInstall(cluster.ID(), nil); err != nil {
+			if viper.GetBool(config.Cluster.Reused) {
+				// We should manually run all our health checks if the cluster is waking up
+				err = clusterutil.WaitForClusterReadyPostWake(cluster.ID(), nil)
+			} else {
+				// This is a new cluster and we should check the OSD Ready job
+				err = clusterutil.WaitForClusterReadyPostInstall(cluster.ID(), nil)
+			}
+			if err != nil {
 				log.Printf("Cluster failed health check: %v", err)
 				getLogs()
 				return false
 			}
-			log.Println("Cluster is healthy and ready for testing")
-		} else {
-			log.Println("Skipping health checks as requested")
 		}
-		if len(viper.GetString(config.Addons.IDs)) > 0 {
-			if viper.GetString(config.Provider) != "mock" {
-				err = installAddons()
-				events.HandleErrorWithEvents(err, events.InstallAddonsSuccessful, events.InstallAddonsFailed)
-				if err != nil {
-					log.Printf("Cluster failed installing addons: %v", err)
-					getLogs()
-					return false
-				}
-			} else {
-				log.Println("Skipping addon installation due to mock provider.")
-				log.Println("If you are running local addon tests, please ensure the addon components are already installed.")
+
+		log.Println("Cluster is healthy and ready for testing")
+	} else {
+		log.Println("Skipping health checks as requested")
+	}
+	if len(viper.GetString(config.Addons.IDs)) > 0 {
+		if viper.GetString(config.Provider) != "mock" {
+			err = installAddons()
+			events.HandleErrorWithEvents(err, events.InstallAddonsSuccessful, events.InstallAddonsFailed)
+			if err != nil {
+				log.Printf("Cluster failed installing addons: %v", err)
+				getLogs()
+				return false
 			}
-		}
-
-		var kubeconfigBytes []byte
-		if kubeconfigBytes, err = provider.ClusterKubeconfig(cluster.ID()); err != nil {
-			events.HandleErrorWithEvents(err, events.InstallKubeconfigRetrievalSuccess, events.InstallKubeconfigRetrievalFailure)
-			log.Printf("Failed retrieving kubeconfig: %v", err)
-			getLogs()
-			return false
-		}
-		viper.Set(config.Kubeconfig.Contents, string(kubeconfigBytes))
-
-		if len(viper.GetString(config.Kubeconfig.Contents)) == 0 {
-			// Give the cluster some breathing room.
-			log.Println("OSD cluster installed. Sleeping for 600s.")
-			time.Sleep(600 * time.Second)
 		} else {
-			log.Printf("No kubeconfig contents found, but there should be some by now.")
+			log.Println("Skipping addon installation due to mock provider.")
+			log.Println("If you are running local addon tests, please ensure the addon components are already installed.")
 		}
+	}
+
+	var kubeconfigBytes []byte
+	if kubeconfigBytes, err = provider.ClusterKubeconfig(viper.GetString(config.Cluster.ID)); err != nil {
+		events.HandleErrorWithEvents(err, events.InstallKubeconfigRetrievalSuccess, events.InstallKubeconfigRetrievalFailure)
+		log.Printf("Failed retrieving kubeconfig: %v", err)
 		getLogs()
+		return false
+	}
+	viper.Set(config.Kubeconfig.Contents, string(kubeconfigBytes))
+
+	if len(viper.GetString(config.Kubeconfig.Contents)) == 0 {
+		// Give the cluster some breathing room.
+		log.Println("OSD cluster installed. Sleeping for 600s.")
+		time.Sleep(600 * time.Second)
+	} else {
+		log.Printf("No kubeconfig contents found, but there should be some by now.")
+	}
+	getLogs()
+
+	// If there are test harnesses present, we need to populate the
+	// secrets into the test cluster
+	if viper.GetString(config.Addons.TestHarnesses) != "" {
+		secretsNamespace := "ci-secrets"
+		h := helper.NewOutsideGinkgo()
+		h.CreateProject(secretsNamespace)
+
+		_, err := h.Kube().CoreV1().Secrets("osde2e-"+secretsNamespace).Create(context.TODO(), &v1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "ci-secrets",
+				Namespace: "osde2e-" + secretsNamespace,
+			},
+			StringData: viper.GetStringMapString(config.NonOSDe2eSecrets),
+		}, metav1.CreateOptions{})
+
+		if err != nil {
+			log.Printf("Error creating Prow secrets in-cluster: %s", err.Error())
+		}
 	}
 	return true
 }
@@ -218,23 +254,26 @@ func installAddons() (err error) {
 // -- END Ginkgo setup
 
 // RunTests initializes Ginkgo and runs the osde2e test suite.
-func RunTests() bool {
+func RunTests() int {
+	var err error
+	var exitCode int
 	testing.Init()
 
-	if err := runGinkgoTests(); err != nil {
+	exitCode, err = runGinkgoTests()
+	if err != nil {
 		log.Printf("Tests failed: %v", err)
-		return false
 	}
 
-	return true
+	return exitCode
 }
 
 // runGinkgoTests runs the osde2e test suite using Ginkgo.
 // nolint:gocyclo
-func runGinkgoTests() error {
+func runGinkgoTests() (int, error) {
 	var err error
 
 	gomega.RegisterFailHandler(ginkgo.Fail)
+	viper.Set(config.Cluster.Passing, false)
 
 	ginkgoConfig.DefaultReporterConfig.NoisySkippings = !viper.GetBool(config.Tests.SuppressSkipNotifications)
 	ginkgoConfig.GinkgoConfig.SkipString = viper.GetString(config.Tests.GinkgoSkip)
@@ -252,7 +291,7 @@ func runGinkgoTests() error {
 		reportDir, err = ioutil.TempDir("", "")
 
 		if err != nil {
-			return fmt.Errorf("error creating temporary directory: %v", err)
+			return Failure, fmt.Errorf("error creating temporary directory: %v", err)
 		}
 
 		log.Printf("Writing files to temporary directory %s", reportDir)
@@ -266,7 +305,7 @@ func runGinkgoTests() error {
 	buildLogWriter, err := os.Create(buildLogPath)
 
 	if err != nil {
-		return fmt.Errorf("unable to create build log in report directory: %v", err)
+		return Failure, fmt.Errorf("unable to create build log in report directory: %v", err)
 	}
 
 	mw := io.MultiWriter(os.Stdout, buildLogWriter)
@@ -281,38 +320,34 @@ func runGinkgoTests() error {
 	if len(viper.GetString(config.Kubeconfig.Path)) > 0 && providerCfg == "mock" {
 		log.Print("Found an existing Kubeconfig!")
 		if provider, err = providers.ClusterProvider(); err != nil {
-			return fmt.Errorf("could not setup cluster provider: %v", err)
+			return Failure, fmt.Errorf("could not setup cluster provider: %v", err)
 		}
 		metadata.Instance.SetEnvironment(provider.Environment())
 	} else {
 		if provider, err = providers.ClusterProvider(); err != nil {
-			return fmt.Errorf("could not setup cluster provider: %v", err)
+			return Failure, fmt.Errorf("could not setup cluster provider: %v", err)
 		}
 
 		metadata.Instance.SetEnvironment(provider.Environment())
 
 		// configure cluster and upgrade versions
 		if err = ChooseVersions(); err != nil {
-			log.Printf("failed to configure versions: %v", err)
-			return nil
+			return Failure, err
 		}
 
 		switch {
 		case !viper.GetBool(config.Cluster.EnoughVersionsForOldestOrMiddleTest):
-			log.Printf("There were not enough available cluster image sets to choose and oldest or middle cluster image set to test against. Skipping tests.")
-			return nil
+			return Aborted, fmt.Errorf("there were not enough available cluster image sets to choose and oldest or middle cluster image set to test against -- skipping tests")
 		case !viper.GetBool(config.Cluster.PreviousVersionFromDefaultFound):
-			log.Printf("No previous version from default found with the given arguments.")
-			return nil
+			return Aborted, fmt.Errorf("no previous version from default found with the given arguments")
 		case viper.GetBool(config.Upgrade.UpgradeVersionEqualToInstallVersion):
-			log.Printf("Install version and upgrade version are the same. Skipping tests.")
-			return nil
+			return Aborted, fmt.Errorf("install version and upgrade version are the same -- skipping tests")
 		case viper.GetString(config.Upgrade.ReleaseName) == util.NoVersionFound:
-			log.Printf("No valid upgrade versions were found. Skipping tests.")
-			return nil
+			return Aborted, fmt.Errorf("no valid upgrade versions were found. Skipping tests")
 		case viper.GetString(config.Upgrade.Image) != "" && viper.GetBool(config.Upgrade.ManagedUpgrade):
-			log.Printf("image-based managed upgrades are unsupported: %s", viper.GetString(config.Upgrade.Image))
-			return nil
+			return Aborted, fmt.Errorf("image-based managed upgrades are unsupported: %s", viper.GetString(config.Upgrade.Image))
+		case viper.GetString(config.Cluster.Version) == "":
+			return Aborted, fmt.Errorf("no valid install version found")
 		}
 	}
 
@@ -327,6 +362,7 @@ func runGinkgoTests() error {
 
 	testsPassed := runTestsInPhase(phase.InstallPhase, "OSD e2e suite", ginkgoConfig.GinkgoConfig.DryRun)
 	getLogs()
+	viper.Set(config.Cluster.Passing, testsPassed)
 	upgradeTestsPassed := true
 
 	// upgrade cluster if requested
@@ -344,14 +380,16 @@ func runGinkgoTests() error {
 			// run the upgrade
 			if err = upgrade.RunUpgrade(); err != nil {
 				events.RecordEvent(events.UpgradeFailed)
-				return fmt.Errorf("error performing upgrade: %v", err)
+				return Failure, fmt.Errorf("error performing upgrade: %v", err)
 			}
 			events.RecordEvent(events.UpgradeSuccessful)
 
 			// test upgrade rescheduling if desired
 			if !viper.GetBool(config.Upgrade.ManagedUpgradeRescheduled) {
 				log.Println("Running e2e tests POST-UPGRADE...")
+				viper.Set(config.Cluster.Passing, false)
 				upgradeTestsPassed = runTestsInPhase(phase.UpgradePhase, "OSD e2e suite post-upgrade", ginkgoConfig.GinkgoConfig.DryRun)
+				viper.Set(config.Cluster.Passing, upgradeTestsPassed)
 			}
 			log.Println("Upgrade rescheduled, skip the POST-UPGRADE testing")
 
@@ -369,7 +407,7 @@ func runGinkgoTests() error {
 
 	if reportDir != "" {
 		if err = metadata.Instance.WriteToJSON(reportDir); err != nil {
-			return fmt.Errorf("error while writing the custom metadata: %v", err)
+			return Failure, fmt.Errorf("error while writing the custom metadata: %v", err)
 		}
 
 		// TODO: SDA-2594 Hotfix
@@ -377,11 +415,11 @@ func runGinkgoTests() error {
 
 		newMetrics := NewMetrics()
 		if newMetrics == nil {
-			return fmt.Errorf("error getting new metrics provider")
+			return Failure, fmt.Errorf("error getting new metrics provider")
 		}
 		prometheusFilename, err := newMetrics.WritePrometheusFile(reportDir)
 		if err != nil {
-			return fmt.Errorf("error while writing prometheus metrics: %v", err)
+			return Failure, fmt.Errorf("error while writing prometheus metrics: %v", err)
 		}
 
 		jobName := viper.GetString(config.JobName)
@@ -391,7 +429,7 @@ func runGinkgoTests() error {
 			log.Printf("Job %s is a rehearsal, so metrics upload is being skipped.", jobName)
 		} else {
 			if err := uploadFileToMetricsBucket(filepath.Join(reportDir, prometheusFilename)); err != nil {
-				return fmt.Errorf("error while uploading prometheus metrics: %v", err)
+				return Failure, fmt.Errorf("error while uploading prometheus metrics: %v", err)
 			}
 		}
 	}
@@ -400,7 +438,7 @@ func runGinkgoTests() error {
 		log.Printf("Destroying cluster '%s'...", clusterID)
 
 		if err = provider.DeleteCluster(clusterID); err != nil {
-			return fmt.Errorf("error deleting cluster: %s", err.Error())
+			return Failure, fmt.Errorf("error deleting cluster: %s", err.Error())
 		}
 	} else {
 		// When using a local kubeconfig, provider might not be set
@@ -415,7 +453,7 @@ func runGinkgoTests() error {
 		h := helper.NewOutsideGinkgo()
 
 		if h == nil {
-			return fmt.Errorf("Unable to generate helper object for cleanup")
+			return Failure, fmt.Errorf("Unable to generate helper object for cleanup")
 		}
 
 		cleanupAfterE2E(h)
@@ -423,13 +461,18 @@ func runGinkgoTests() error {
 	}
 
 	if !testsPassed || !upgradeTestsPassed {
-		return fmt.Errorf("please inspect logs for more details")
+		viper.Set(config.Cluster.Passing, false)
+		return Failure, fmt.Errorf("please inspect logs for more details")
 	}
 
-	return nil
+	return Success, nil
 }
 
 func openPDAlerts(suites []junit.Suite, jobName, jobURL string) {
+	if strings.Contains(strings.ToLower(jobName), "addon") {
+		// do not report pd alerts from addon tests
+		return
+	}
 	pdc := pagerduty.Config{
 		IntegrationKey: viper.GetString(config.Alert.PagerDutyAPIToken),
 	}
@@ -473,6 +516,10 @@ PD info: %v`, jobName, jobURL, event)); err != nil {
 	}
 	// open an alert for each failing test
 	for _, name := range failingTests {
+		if strings.Contains(name, "informing") {
+			// skip informing suite failures, as they do not warrant CI watcher investigation
+			continue
+		}
 		if _, err := pdc.FireAlert(pd.V2Payload{
 			Summary:  name + " failed",
 			Severity: "info",
@@ -488,6 +535,7 @@ PD info: %v`, jobName, jobURL, event)); err != nil {
 
 func cleanupAfterE2E(h *helper.H) (errors []error) {
 	var err error
+	clusterStatus := clusterproperties.StatusCompletedFailing
 	defer ginkgo.GinkgoRecover()
 
 	if viper.GetBool(config.MustGather) {
@@ -502,10 +550,12 @@ func cleanupAfterE2E(h *helper.H) (errors []error) {
 
 		if err != nil {
 			log.Printf("Error running must-gather: %s", err.Error())
+			clusterStatus = clusterproperties.StatusCompletedError
 		} else {
 			gatherResults, err := r.RetrieveResults()
 			if err != nil {
 				log.Printf("Error retrieving must-gather results: %s", err.Error())
+				clusterStatus = clusterproperties.StatusCompletedError
 			} else {
 				h.WriteResults(gatherResults)
 			}
@@ -525,16 +575,19 @@ func cleanupAfterE2E(h *helper.H) (errors []error) {
 		data, err := json.MarshalIndent(list, "", "    ")
 		if err != nil {
 			log.Printf("error marshalling JSON for %s/%s/%s", resource.Group, resource.Version, resource.Resource)
+			clusterStatus = clusterproperties.StatusCompletedError
 		} else {
 			var gbuf bytes.Buffer
 			zw := gzip.NewWriter(&gbuf)
 			_, err = zw.Write(data)
 			if err != nil {
 				log.Print("Error writing data to buffer")
+				clusterStatus = clusterproperties.StatusCompletedError
 			}
 			err = zw.Close()
 			if err != nil {
 				log.Print("Error closing writer to buffer")
+				clusterStatus = clusterproperties.StatusCompletedError
 			}
 			// include gzip in filename to mark compressed data
 			filename := fmt.Sprintf("%s-%s-%s.json.gzip", resource.Group, resource.Version, resource.Resource)
@@ -550,6 +603,7 @@ func cleanupAfterE2E(h *helper.H) (errors []error) {
 	if len(clusterID) > 0 {
 		if provider, err = providers.ClusterProvider(); err != nil {
 			log.Printf("Error getting cluster provider: %s", err.Error())
+			clusterStatus = clusterproperties.StatusCompletedError
 		}
 
 		// Get state from Provisioner
@@ -558,14 +612,21 @@ func cleanupAfterE2E(h *helper.H) (errors []error) {
 		cluster, err := provider.GetCluster(clusterID)
 		if err != nil {
 			log.Printf("error getting Cluster state: %s", err.Error())
+			clusterStatus = clusterproperties.StatusCompletedError
 		} else {
 			defer func() {
 				// set the completed property right before this function returns, which should be after
 				// all cleanup is finished.
-				err = provider.AddProperty(cluster, clusterproperties.Status, clusterproperties.StatusCompleted)
+				if viper.GetBool(config.Cluster.Passing) {
+					clusterStatus = clusterproperties.StatusCompletedPassing
+				}
+
+				err = provider.AddProperty(cluster, clusterproperties.Status, clusterStatus)
+				err = provider.AddProperty(cluster, clusterproperties.JobID, "")
 				if err != nil {
 					log.Printf("Failed setting completed status: %v", err)
 				}
+
 			}()
 			log.Printf("Cluster addons: %v", cluster.Addons())
 			log.Printf("Cluster cloud provider: %v", cluster.CloudProvider())
@@ -601,15 +662,21 @@ func cleanupAfterE2E(h *helper.H) (errors []error) {
 	// We need a provider to hibernate
 	// We need a cluster to hibernate
 	// We need to check that the test run wants to hibernate after this run
-	/*
-		if provider != nil && viper.GetString(config.Cluster.ID) != "" && viper.GetBool(config.Cluster.HibernateAfterUse) {
-			msg := "Unable to hibernate %s"
-			if provider.Hibernate(viper.GetString(config.Cluster.ID)) {
-				msg = "Hibernating %s"
-			}
-			log.Printf(msg, viper.GetString(config.Cluster.ID))
+	if provider != nil && viper.GetString(config.Cluster.ID) != "" && viper.GetBool(config.Cluster.HibernateAfterUse) {
+		msg := "Unable to hibernate %s"
+		if provider.Hibernate(viper.GetString(config.Cluster.ID)) {
+			msg = "Hibernating %s"
 		}
-	*/
+		log.Printf(msg, viper.GetString(config.Cluster.ID))
+
+		// Current default expiration is 6 hours.
+		// If the cluster hasn't been recycled, and the tests passed: Extend it 24h
+		if !viper.GetBool(config.Cluster.Reused) && clusterStatus != clusterproperties.StatusCompletedError {
+			if err := provider.ExtendExpiry(viper.GetString(config.Cluster.ID), 18, 0, 0); err != nil {
+				log.Printf("Error extending cluster expiration: %s", err.Error())
+			}
+		}
+	}
 	return errors
 }
 
@@ -687,7 +754,7 @@ func runTestsInPhase(phase string, description string, dryrun bool) bool {
 	}
 	// If we could have opened new alerts, consolidate them
 	if os.Getenv("JOB_TYPE") == "periodic" {
-		err := pagerduty.MergeCICDIncidents(pd.NewClient(viper.GetString(config.Alert.PagerDutyUserToken)))
+		err := pagerduty.ProcessCICDIncidents(pd.NewClient(viper.GetString(config.Alert.PagerDutyUserToken)))
 		if err != nil {
 			log.Printf("Failed merging PD incidents: %v", err)
 		}

@@ -5,7 +5,7 @@ import (
 	"log"
 	"sync"
 
-	"github.com/spf13/viper"
+	viper "github.com/openshift/osde2e/pkg/common/concurrentviper"
 )
 
 const (
@@ -62,6 +62,13 @@ const (
 
 	// CanaryChance
 	CanaryChance = "canaryChance"
+
+	// Default network provider for OSD
+	DefaultNetworkProvider = "OpenShiftSDN"
+
+	// NonOSDe2eSecrets is an internal-only Viper Key.
+	// End users should not be using this key, there may be unforeseen consequences.
+	NonOSDe2eSecrets = "nonOSDe2eSecrets"
 )
 
 // This is a config key to secret file mapping. We will attempt to read in from secret files before loading anything else.
@@ -289,6 +296,9 @@ var Cluster = struct {
 	// NumWorkerNodes overrides the flavour's number of worker nodes specified
 	NumWorkerNodes string
 
+	// NetworkProvider chooses the network driver powering the cluster.
+	NetworkProvider string
+
 	// Specify a key in the pre-defined imageContentSource array in the ocmprovider
 	// Blank will default to a randomized option
 	ImageContentSource string
@@ -301,6 +311,17 @@ var Cluster = struct {
 	// HibernateAfterUse will tell the provider to attempt to hibernate the cluster after
 	// the test run, assuming the provider supports hibernation
 	HibernateAfterUse string
+
+	// UseExistingCluster will allow the test run to use an existing cluster if available
+	// ENV: USE_EXISTING_CLUSTER
+	// Default: True
+	UseExistingCluster string
+
+	// Passing tracks the internal status of the tests: Pass or Fail
+	Passing string
+
+	// Reused tracks whether this cluster's test run used a new or recycled cluster
+	Reused string
 }{
 	MultiAZ:                             "cluster.multiAZ",
 	Channel:                             "cluster.channel",
@@ -325,9 +346,13 @@ var Cluster = struct {
 	PreviousVersionFromDefaultFound:     "cluster.previousVersionFromDefaultFound",
 	ProvisionShardID:                    "cluster.provisionshardID",
 	NumWorkerNodes:                      "cluster.numWorkerNodes",
+	NetworkProvider:                     "cluster.networkProvider",
 	ImageContentSource:                  "cluster.imageContentSource",
 	InstallConfig:                       "cluster.installConfig",
 	HibernateAfterUse:                   "cluster.hibernateAfterUse",
+	UseExistingCluster:                  "cluster.useExistingCluster",
+	Passing:                             "cluster.passing",
+	Reused:                              "cluster.rused",
 }
 
 // CloudProvider config keys.
@@ -556,7 +581,7 @@ func init() {
 	viper.SetDefault(Cluster.MultiAZ, false)
 	viper.BindEnv(Cluster.MultiAZ, "MULTI_AZ")
 
-	viper.SetDefault(Cluster.Channel, "stable")
+	viper.SetDefault(Cluster.Channel, "candidate")
 	viper.BindEnv(Cluster.Channel, "CHANNEL")
 
 	viper.SetDefault(Cluster.DestroyAfterTest, false)
@@ -618,8 +643,17 @@ func init() {
 	viper.BindEnv(Cluster.ImageContentSource, "CLUSTER_IMAGE_CONTENT_SOURCE")
 	viper.BindEnv(Cluster.InstallConfig, "CLUSTER_INSTALL_CONFIG")
 
+	viper.SetDefault(Cluster.NetworkProvider, DefaultNetworkProvider)
+	viper.BindEnv(Cluster.NetworkProvider, "CLUSTER_NETWORK_PROVIDER")
+
 	viper.SetDefault(Cluster.HibernateAfterUse, true)
 	viper.BindEnv(Cluster.HibernateAfterUse, "HIBERNATE_AFTER_USE")
+
+	viper.SetDefault(Cluster.UseExistingCluster, true)
+	viper.BindEnv(Cluster.UseExistingCluster, "USE_EXISTING_CLUSTER")
+
+	viper.SetDefault(Cluster.Reused, false)
+	viper.SetDefault(Cluster.Passing, false)
 
 	// ----- Cloud Provider -----
 	viper.SetDefault(CloudProvider.CloudProviderID, "aws")
