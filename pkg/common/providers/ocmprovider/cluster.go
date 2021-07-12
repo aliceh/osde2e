@@ -64,17 +64,20 @@ func (o *OCMProvider) IsValidClusterName(clusterName string) (bool, error) {
 }
 
 // LaunchCluster setups an new cluster using the OSD API and returns it's ID.
+// nolint:gocyclo
 func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 	flavourID := getFlavour()
-	if flavourID == "" {
-		return "", fmt.Errorf("No flavour has been selected")
-	}
-
-	// check that enough quota exists for this test if creating cluster
-	if enoughQuota, err := o.CheckQuota(flavourID); err != nil {
-		log.Printf("Failed to check if enough quota is available: %v", err)
-	} else if !enoughQuota {
-		return "", fmt.Errorf("currently not enough quota exists to run this test")
+	skuID := getSKU()
+	if skuID != "" {
+		// check that enough quota exists for this test if creating cluster
+		if enoughQuota, err := o.CheckQuota(skuID); err != nil {
+			log.Printf("Failed to check if enough quota is available: %v", err)
+		} else if !enoughQuota {
+			return "", fmt.Errorf("currently not enough quota exists to run this test")
+		}
+	} else {
+		// If no SKU specified, just continue on with no validation, but log it
+		log.Printf("No SKU specified, will not check if enough quota is available.")
 	}
 
 	multiAZ := viper.GetBool(config.Cluster.MultiAZ)
@@ -199,8 +202,12 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 
 	var resp *v1.ClustersAddResponse
 
-	if viper.GetBool(config.Cluster.UseExistingCluster) {
-		if clusterID := o.findRecycledCluster(cluster); clusterID != "" {
+	if viper.GetBool(config.Cluster.UseExistingCluster) && viper.GetString(config.Addons.IDs) == "" {
+		product := cluster.Product().ID()
+		if product == "" {
+			product = "osd"
+		}
+		if clusterID := o.FindRecycledCluster(cluster.Version().ID(), cluster.CloudProvider().ID(), product); clusterID != "" {
 			return clusterID, nil
 		}
 	}
@@ -224,10 +231,10 @@ func (o *OCMProvider) LaunchCluster(clusterName string) (string, error) {
 	return resp.Body().ID(), nil
 }
 
-func (o *OCMProvider) findRecycledCluster(cluster *v1.Cluster) string {
-	version := semver.MustParse(strings.TrimPrefix(cluster.Version().ID(), "openshift-"))
-	query := fmt.Sprintf("cloud_provider.id='%s' and properties.JobID='' and properties.Status like '%s%%' and version.id like 'openshift-v%s%%'",
-		cluster.CloudProvider().ID(), "completed-", version.String())
+func (o *OCMProvider) FindRecycledCluster(originalVersion, cloudProvider, product string) string {
+	version := semver.MustParse(strings.TrimPrefix(originalVersion, "openshift-"))
+	query := fmt.Sprintf("cloud_provider.id='%s' and properties.JobName='' and properties.JobID='' and product.id='%s' and properties.Status like '%s%%' and version.id like 'openshift-v%s%%'",
+		cloudProvider, product, "completed-", version.String())
 
 	log.Println(query)
 
@@ -241,7 +248,28 @@ func (o *OCMProvider) findRecycledCluster(cluster *v1.Cluster) string {
 			return ""
 		}
 
+		if recycledCluster.ExpirationTimestamp().Before(time.Now().Add(4 * time.Hour)) {
+			// Let's just expire this cluster immediately
+			err = o.AddProperty(spiRecycledCluster, clusterproperties.JobName, "expiring")
+			if err != nil {
+				log.Printf("Error adding `expiring` to job name: %s", err.Error())
+				return ""
+			}
+			err = o.Expire(spiRecycledCluster.ID())
+			if err != nil {
+				log.Printf("Error expiring cluster %s: %s", spiRecycledCluster.ID(), err.Error())
+				return ""
+			}
+			// Now try and grab a different existing cluster
+			return o.FindRecycledCluster(originalVersion, cloudProvider, product)
+		}
+
 		err = o.AddProperty(spiRecycledCluster, clusterproperties.JobID, viper.GetString(config.JobID))
+		if err != nil {
+			log.Printf("Error adding property to cluster: %s", err.Error())
+			return ""
+		}
+		err = o.AddProperty(spiRecycledCluster, clusterproperties.JobName, viper.GetString(config.JobName))
 		if err != nil {
 			log.Printf("Error adding property to cluster: %s", err.Error())
 			return ""
@@ -256,7 +284,7 @@ func (o *OCMProvider) findRecycledCluster(cluster *v1.Cluster) string {
 		}
 		if jobID, ok := spiRecycledCluster.Properties()["JobID"]; ok && jobID != viper.GetString(config.JobID) {
 			log.Printf("Cluster already recycled by %s", spiRecycledCluster.Properties()["JobID"])
-			return o.findRecycledCluster(cluster)
+			return o.FindRecycledCluster(originalVersion, cloudProvider, product)
 		}
 
 		if recycledCluster.State() == v1.ClusterStateReady {
@@ -388,10 +416,11 @@ func ChooseRandomRegion(regions ...CloudRegion) (CloudRegion, bool) {
 // by the OCM provider. (Returns a random machine type if the config suggests it to be random.)
 func (o *OCMProvider) DetermineMachineType(cloudProvider string) (string, error) {
 	computeMachineType := viper.GetString(ComputeMachineType)
+	returnedType := ""
 
-	// If a region is set to "random", it will poll OCM for all the regions available
-	// It then will pull a random entry from the list of regions and set the ID to that
-	if computeMachineType == "random" {
+	// If a machineType is set to "random", it will poll OCM for all the machines available
+	// It then will pull a random entry from the list of machines and set the machineTypes to that
+	if computeMachineType == "random" && rand.Intn(3) >= 2 {
 		searchstring := fmt.Sprintf("cloud_provider.id like '%s'", cloudProvider)
 		machinetypeClient := o.conn.ClustersMgmt().V1().MachineTypes().List().Search(searchstring)
 
@@ -402,16 +431,17 @@ func (o *OCMProvider) DetermineMachineType(cloudProvider string) (string, error)
 
 		for range machinetypes.Items().Slice() {
 			machinetypeObj := machinetypes.Items().Slice()[rand.Intn(machinetypes.Total())]
-			computeMachineType = machinetypeObj.ID()
+			returnedType = machinetypeObj.ID()
 			break
 		}
-
-		log.Printf("Random machine type requested, selected %s machine type.", computeMachineType)
-
-		// Update the Config with the selected random region
-		viper.Set(ComputeMachineType, computeMachineType)
 	}
-	return computeMachineType, nil
+
+	log.Printf("Random machine type requested, selected `%s` machine type.", returnedType)
+
+	// Update the Config with the selected random machine
+	viper.Set(ComputeMachineType, returnedType)
+
+	return returnedType, nil
 }
 
 // GenerateProperties will generate a set of properties to assign to a cluster.
@@ -439,6 +469,7 @@ func (o *OCMProvider) GenerateProperties() (map[string]string, error) {
 	provisionshardID := viper.GetString(config.Cluster.ProvisionShardID)
 
 	properties := map[string]string{
+		clusterproperties.JobName:          viper.GetString(config.JobName),
 		clusterproperties.JobID:            viper.GetString(config.JobID),
 		clusterproperties.MadeByOSDe2e:     "true",
 		clusterproperties.OwnedBy:          username,
@@ -895,6 +926,10 @@ func (o *OCMProvider) ocmToSPICluster(ocmCluster *v1.Cluster) (*spi.Cluster, err
 		cluster.CloudProvider(cloudProvider.ID())
 	}
 
+	if product, ok := ocmCluster.GetProduct(); ok {
+		cluster.Product(product.ID())
+	}
+
 	if state, ok := ocmCluster.GetState(); ok {
 		cluster.State(ocmStateToInternalState(state))
 	}
@@ -943,6 +978,7 @@ func (o *OCMProvider) ocmToSPICluster(ocmCluster *v1.Cluster) (*spi.Cluster, err
 	}
 
 	cluster.ExpirationTimestamp(ocmCluster.ExpirationTimestamp())
+	cluster.CreationTimestamp(ocmCluster.CreationTimestamp())
 	cluster.NumComputeNodes(ocmCluster.Nodes().Compute())
 
 	return cluster.Build(), nil
@@ -1043,6 +1079,53 @@ func (o *OCMProvider) ExtendExpiry(clusterID string, hours uint64, minutes uint6
 	return nil
 }
 
+// Expire sets the expiration time of an existing cluster to the current time
+func (o *OCMProvider) Expire(clusterID string) error {
+	var resp *v1.ClusterUpdateResponse
+
+	now := time.Now().Add(1 * time.Minute)
+
+	extendexpiryCluster, err := v1.NewCluster().ExpirationTimestamp(now).Build()
+
+	if err != nil {
+		return fmt.Errorf("error while building updated expiration time cluster object: %v", err)
+	}
+
+	err = retryer().Do(func() error {
+		var err error
+		resp, err = o.conn.ClustersMgmt().V1().Clusters().Cluster(clusterID).Update().
+			Body(extendexpiryCluster).
+			Send()
+
+		if err != nil {
+			err = fmt.Errorf("couldn't update cluster '%s': %v", clusterID, err)
+			log.Printf("%v", err)
+			return err
+		}
+
+		if resp != nil && resp.Error() != nil {
+			log.Printf("error while trying to update cluster: %v", err)
+			return errResp(resp.Error())
+		}
+
+		o.updateClusterCache(clusterID, resp.Body())
+
+		return nil
+	})
+
+	if err != nil {
+		return err
+	}
+
+	if resp.Error() != nil {
+		return resp.Error()
+	}
+
+	log.Println("Successfully set cluster expiry time to", now.UTC().Format("Monday, 02 Jan 2006 15:04:05 MST"))
+
+	return nil
+}
+
 // AddProperty adds a new property to the properties field of an existing cluster
 func (o *OCMProvider) AddProperty(cluster *spi.Cluster, tag string, value string) error {
 	var resp *v1.ClusterUpdateResponse
@@ -1136,6 +1219,12 @@ func (o *OCMProvider) GetUpgradePolicyID(clusterID string) (string, error) {
 	if listResp.Status() != http.StatusOK {
 		log.Printf("Unable to find upgrade schedule with provider (status %d, response %v)", listResp.Status(), listResp.Error())
 		return "", listResp.Error()
+	}
+
+	if listResp.Items().Len() < 1 {
+		// Don't treat this as an error (because it may not be), just return nothing
+		log.Printf("No upgrade policies currently exist on the provider.")
+		return "", nil
 	}
 
 	policyID := listResp.Items().Get(0).ID()

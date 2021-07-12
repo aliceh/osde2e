@@ -22,6 +22,9 @@ const (
 
 	// MockRegion indicates that the region used is just a mock.
 	MockRegion = "mock-region"
+
+	// MockProduct indicates a product that is just a mock.
+	MockProduct = "mock-product"
 )
 
 // MockProvider for unit testing.
@@ -92,7 +95,9 @@ func (m *MockProvider) LaunchCluster(clusterName string) (string, error) {
 		Version(viper.GetString(config.Cluster.Version)).
 		State(spi.ClusterStateReady).
 		CloudProvider(MockCloudProvider).
+		Product(MockProduct).
 		Region(MockRegion).
+		CreationTimestamp(time.Now().Add(-2 * time.Hour)).
 		ExpirationTimestamp(time.Now()).
 		Flavour("osd-4").
 		Build()
@@ -165,7 +170,7 @@ func (m *MockProvider) ClusterKubeconfig(clusterID string) ([]byte, error) {
 }
 
 // CheckQuota mocks a check quota operation.
-func (m *MockProvider) CheckQuota(flavour string) (bool, error) {
+func (m *MockProvider) CheckQuota(sku string) (bool, error) {
 	if m.env == "fail" {
 		return false, fmt.Errorf("failed to get versions: Some fake error")
 	}
@@ -260,6 +265,11 @@ func (m *MockProvider) Type() string {
 // ExtendExpiry mocks an extend cluster expiry operation.
 func (m *MockProvider) ExtendExpiry(clusterID string, hours uint64, minutes uint64, seconds uint64) error {
 	return fmt.Errorf("ExtendExpiry is unsupported by mock clusters")
+}
+
+// Expire mocks an expire cluster expiry operation.
+func (m *MockProvider) Expire(clusterID string) error {
+	return fmt.Errorf("Expire is unsupported by mock clusters")
 }
 
 // AddProperty mocks an add new cluster property operation.

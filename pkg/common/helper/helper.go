@@ -44,7 +44,11 @@ func Init() *H {
 // New instantiates a helper function to be used within a Ginkgo Test block
 func New() *H {
 	h := Init()
-	ginkgo.BeforeEach(h.SetupWrapper)
+	err := h.Setup()
+
+	if err != nil {
+		log.Fatalf("Error creating helper: %s", err.Error())
+	}
 
 	return h
 }
@@ -72,12 +76,6 @@ type H struct {
 	restConfig *rest.Config
 	proj       *projectv1.Project
 	mutex      sync.Mutex
-}
-
-// SetupWrapper is a Ginkgo-Friendly setup function to pass to BeforeEach
-func (h *H) SetupWrapper() {
-	err := h.Setup()
-	Expect(err).ShouldNot(HaveOccurred(), "failed to configure helper object")
 }
 
 // Setup configures a *rest.Config using the embedded kubeconfig then sets up a Project for tests to run in.
@@ -345,9 +343,18 @@ func (h *H) InspectState() {
 		h.proj, err = h.Project().ProjectV1().Projects().Get(context.TODO(), project, metav1.GetOptions{})
 		Expect(err).ShouldNot(HaveOccurred(), "failed to retrieve project")
 		Expect(h.proj).ShouldNot(BeNil())
-
 	}
-	err = h.inspect(h.CurrentProject())
+
+	// Always inspect the E2E project
+	inspectProjects := []string{h.CurrentProject()}
+
+	// Add any additional configured projects to inspect
+	projectsToInspectStr := viper.GetString(config.Cluster.InspectNamespaces)
+	if projectsToInspectStr != "" {
+		inspectProjects = append(inspectProjects, strings.Split(projectsToInspectStr, ",")...)
+	}
+
+	err = h.inspect(inspectProjects)
 	Expect(err).ShouldNot(HaveOccurred(), "could not inspect project '%s'", h.proj)
 }
 

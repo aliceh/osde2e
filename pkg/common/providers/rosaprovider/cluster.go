@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"net"
+	"strings"
 	"time"
 
 	"github.com/Masterminds/semver"
@@ -117,12 +118,19 @@ func (m *ROSAProvider) LaunchCluster(clusterName string) (string, error) {
 	falseValue := false
 
 	clustersClient := m.ocmProvider.GetConnection().ClustersMgmt().V1().Clusters()
+
+	rosaClusterVersion := strings.Replace(viper.GetString(config.Cluster.Version), "-fast", "", -1)
+	rosaClusterVersion = strings.Replace(rosaClusterVersion, "-candidate", "", -1)
+	rosaClusterVersion = fmt.Sprintf("%s-%s", rosaClusterVersion, viper.GetString(config.Cluster.Channel))
+	rosaClusterVersion = strings.Replace(rosaClusterVersion, "-stable", "", -1)
+	log.Printf("ROSA cluster version: %s", rosaClusterVersion)
+
 	clusterSpec := cluster.Spec{
 		Name:               clusterName,
 		Region:             region,
 		ChannelGroup:       viper.GetString(config.Cluster.Channel),
 		MultiAZ:            viper.GetBool(config.Cluster.MultiAZ),
-		Version:            viper.GetString(config.Cluster.Version),
+		Version:            rosaClusterVersion,
 		Expiration:         expiration,
 		ComputeMachineType: viper.GetString(ComputeMachineType),
 		ComputeNodes:       viper.GetInt(ComputeNodes),
@@ -135,6 +143,12 @@ func (m *ROSAProvider) LaunchCluster(clusterName string) (string, error) {
 		HostPrefix:        viper.GetInt(HostPrefix),
 		SubnetIds:         []string{},
 		AvailabilityZones: []string{},
+	}
+
+	if viper.GetBool(config.Cluster.UseExistingCluster) && viper.GetString(config.Addons.IDs) == "" {
+		if clusterID := m.ocmProvider.FindRecycledCluster(clusterSpec.Version, "aws", "rosa"); clusterID != "" {
+			return clusterID, nil
+		}
 	}
 
 	err = callAndSetAWSSession(func() error {
@@ -159,6 +173,15 @@ func (m *ROSAProvider) Versions() (*spi.VersionList, error) {
 	if err != nil {
 		return nil, err
 	}
+
+	if viper.GetString(config.Cluster.Channel) != "stable" {
+		versionResponseChannel, err := versions.GetVersions(clustersClient, viper.GetString(config.Cluster.Channel))
+		if err != nil {
+			return nil, err
+		}
+		versionResponse = append(versionResponse, versionResponseChannel...)
+	}
+
 	spiVersions := []*spi.Version{}
 	var defaultVersionOverride *semver.Version = nil
 

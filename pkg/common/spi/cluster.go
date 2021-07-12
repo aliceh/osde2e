@@ -38,7 +38,9 @@ type Cluster struct {
 	name                string
 	version             string
 	cloudProvider       string
+	product             string
 	region              string
+	creationTimestamp   time.Time
 	expirationTimestamp time.Time
 	state               ClusterState
 	flavour             string
@@ -72,6 +74,11 @@ func (c *Cluster) CloudProvider() string {
 	return c.cloudProvider
 }
 
+// Product returns the product.
+func (c *Cluster) Product() string {
+	return c.product
+}
+
 // Region returns the cloud provider region.
 func (c *Cluster) Region() string {
 	return c.region
@@ -80,6 +87,11 @@ func (c *Cluster) Region() string {
 // ExpirationTimestamp returns the expiration timestamp.
 func (c *Cluster) ExpirationTimestamp() time.Time {
 	return c.expirationTimestamp
+}
+
+// CreationTimestamp returns the creation timestamp.
+func (c *Cluster) CreationTimestamp() time.Time {
+	return c.creationTimestamp
 }
 
 // State returns the cluster state.
@@ -113,7 +125,9 @@ type ClusterBuilder struct {
 	name                string
 	version             string
 	cloudProvider       string
+	product             string
 	region              string
+	creationTimestamp   time.Time
 	expirationTimestamp time.Time
 	state               ClusterState
 	flavour             string
@@ -154,6 +168,12 @@ func (cb *ClusterBuilder) CloudProvider(cloudProvider string) *ClusterBuilder {
 	return cb
 }
 
+// Product sets the cloud provider for a cluster builder.
+func (cb *ClusterBuilder) Product(product string) *ClusterBuilder {
+	cb.product = product
+	return cb
+}
+
 // Region sets the region for a cluster builder.
 func (cb *ClusterBuilder) Region(region string) *ClusterBuilder {
 	cb.region = region
@@ -163,6 +183,12 @@ func (cb *ClusterBuilder) Region(region string) *ClusterBuilder {
 // ExpirationTimestamp sets the expiration timestamp for a cluster builder.
 func (cb *ClusterBuilder) ExpirationTimestamp(expirationTimestamp time.Time) *ClusterBuilder {
 	cb.expirationTimestamp = expirationTimestamp
+	return cb
+}
+
+// CreationTimestamp sets the creation timestamp for a cluster builder.
+func (cb *ClusterBuilder) CreationTimestamp(creationTimestamp time.Time) *ClusterBuilder {
+	cb.creationTimestamp = creationTimestamp
 	return cb
 }
 
@@ -210,8 +236,10 @@ func (cb *ClusterBuilder) Build() *Cluster {
 		name:                cb.name,
 		version:             cb.version,
 		cloudProvider:       cb.cloudProvider,
+		product:             cb.product,
 		region:              cb.region,
 		expirationTimestamp: cb.expirationTimestamp,
+		creationTimestamp:   cb.creationTimestamp,
 		state:               cb.state,
 		flavour:             cb.flavour,
 		addons:              cb.addons,

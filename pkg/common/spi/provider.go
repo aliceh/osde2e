@@ -62,7 +62,7 @@ type Provider interface {
 	//
 	// To prevent a provisioning attempt, OSDe2e will first check the quota first. This quota
 	// is currently expected to be configured by the global config object.
-	CheckQuota(flavour string) (bool, error)
+	CheckQuota(sku string) (bool, error)
 
 	// InstallAddons will install addons onto the cluster.
 	//
@@ -112,6 +112,9 @@ type Provider interface {
 
 	//ExtendExpiry extends the expiration time of an existing cluster.
 	ExtendExpiry(clusterID string, hours uint64, minutes uint64, seconds uint64) error
+
+	//Expire sets the expiration of an existing cluster to the current time.
+	Expire(clusterID string) error
 
 	// AddProperty adds a new property to the properties field of an existing cluster.
 	AddProperty(cluster *Cluster, tag string, value string) error

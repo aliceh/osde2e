@@ -34,8 +34,8 @@ func (m *ROSAProvider) ClusterKubeconfig(clusterID string) ([]byte, error) {
 }
 
 // CheckQuota will call CheckQuota from the OCM provider.
-func (m *ROSAProvider) CheckQuota(flavour string) (bool, error) {
-	return m.ocmProvider.CheckQuota(flavour)
+func (m *ROSAProvider) CheckQuota(sku string) (bool, error) {
+	return m.ocmProvider.CheckQuota(sku)
 }
 
 // InstallAddons will call InstallAddons from the OCM provider.
@@ -71,6 +71,11 @@ func (m *ROSAProvider) CincinnatiChannel() spi.CincinnatiChannel {
 // ExtendExpiry will call ExtendExpiry from the OCM provider.
 func (m *ROSAProvider) ExtendExpiry(clusterID string, hours uint64, minutes uint64, seconds uint64) error {
 	return m.ocmProvider.ExtendExpiry(clusterID, hours, minutes, seconds)
+}
+
+// Expire will call Expire from the OCM provider.
+func (m *ROSAProvider) Expire(clusterID string) error {
+	return m.ocmProvider.Expire(clusterID)
 }
 
 // AddProperty will call AddProperty from the OCM provider.

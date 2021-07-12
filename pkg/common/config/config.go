@@ -4,6 +4,7 @@ package config
 import (
 	"log"
 	"sync"
+	"time"
 
 	viper "github.com/openshift/osde2e/pkg/common/concurrentviper"
 )
@@ -69,6 +70,9 @@ const (
 	// NonOSDe2eSecrets is an internal-only Viper Key.
 	// End users should not be using this key, there may be unforeseen consequences.
 	NonOSDe2eSecrets = "nonOSDe2eSecrets"
+
+	// JobStartedAt tracks when the job began running.
+	JobStartedAt = "JobStartedAt"
 )
 
 // This is a config key to secret file mapping. We will attempt to read in from secret files before loading anything else.
@@ -322,6 +326,9 @@ var Cluster = struct {
 
 	// Reused tracks whether this cluster's test run used a new or recycled cluster
 	Reused string
+
+	// InspectNamespaces is a comma-delimited list of namespaces to perform an inspect on during test cleanup
+	InspectNamespaces string
 }{
 	MultiAZ:                             "cluster.multiAZ",
 	Channel:                             "cluster.channel",
@@ -353,6 +360,7 @@ var Cluster = struct {
 	UseExistingCluster:                  "cluster.useExistingCluster",
 	Passing:                             "cluster.passing",
 	Reused:                              "cluster.rused",
+	InspectNamespaces:                   "cluster.inspectNamespaces",
 }
 
 // CloudProvider config keys.
@@ -476,10 +484,38 @@ var Alert = struct {
 	PagerDutyUserToken: "alert.pagerDutyUserToken",
 }
 
+// Database config keys.
+var Database = struct {
+	// The Postgres user used to access the database.
+	// Env: PG_USER
+	User string
+	// The Postgres password for the user.
+	// Env: PG_PASS
+	Pass string
+	// The Postgres instance's hostname.
+	// Env: PG_HOST
+	Host string
+	// The Postgres instance's listen port.
+	// Env: PG_PORT
+	Port string
+	// The Postgres database name to connect to.
+	// Env: PG_DATABASE
+	DatabaseName string
+}{
+	User:         "database.user",
+	Pass:         "database.pass",
+	Host:         "database.host",
+	Port:         "database.port",
+	DatabaseName: "database.name",
+}
+
 func init() {
 	// Here's where we bind environment variables to config options and set defaults
 
 	viper.SetConfigType("yaml") // Our configs are all in yaml.
+
+	// capture job startup time
+	viper.SetDefault(JobStartedAt, time.Now().UTC().Format(time.RFC3339))
 
 	// ----- Top Level Configs -----
 	viper.SetDefault(Provider, "ocm")
@@ -549,7 +585,7 @@ func init() {
 	viper.BindEnv(Kubeconfig.Path, "TEST_KUBECONFIG")
 
 	// ----- Tests -----
-	viper.SetDefault(Tests.PollingTimeout, 30)
+	viper.SetDefault(Tests.PollingTimeout, 60)
 	viper.BindEnv(Tests.PollingTimeout, "POLLING_TIMEOUT")
 
 	viper.BindEnv(Tests.GinkgoSkip, "GINKGO_SKIP")
@@ -655,6 +691,9 @@ func init() {
 	viper.SetDefault(Cluster.Reused, false)
 	viper.SetDefault(Cluster.Passing, false)
 
+	viper.SetDefault(Cluster.InspectNamespaces, "")
+	viper.BindEnv(Cluster.InspectNamespaces, "INSPECT_NAMESPACES")
+
 	// ----- Cloud Provider -----
 	viper.SetDefault(CloudProvider.CloudProviderID, "aws")
 	viper.BindEnv(CloudProvider.CloudProviderID, "CLOUD_PROVIDER_ID")
@@ -706,6 +745,25 @@ func init() {
 
 	viper.BindEnv(Alert.PagerDutyUserToken, "PAGERDUTY_USER_TOKEN")
 	RegisterSecret(Alert.PagerDutyUserToken, "pagerduty-user-token")
+
+	// ----- Database -----
+	viper.SetDefault(Database.User, "postgres")
+	viper.BindEnv(Database.User, "PG_USER")
+	RegisterSecret(Database.User, "rds-user")
+
+	viper.BindEnv(Database.Pass, "PG_PASS")
+	RegisterSecret(Database.Pass, "rds-pass")
+
+	viper.BindEnv(Database.Host, "PG_HOST")
+	RegisterSecret(Database.Host, "rds-host")
+
+	viper.SetDefault(Database.Port, "5432")
+	viper.BindEnv(Database.Port, "PG_PORT")
+	RegisterSecret(Database.Port, "rds-port")
+
+	viper.SetDefault(Database.DatabaseName, "cicd_test_data")
+	viper.BindEnv(Database.DatabaseName, "PG_DATABASE")
+	RegisterSecret(Database.DatabaseName, "rds-database")
 }
 
 // PostProcess is a variety of post-processing commands that is intended to be run after a config is loaded.

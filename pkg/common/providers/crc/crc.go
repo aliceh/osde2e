@@ -36,6 +36,9 @@ const (
 	// CloudProvider indicates that the cloud provider is just a CRC.
 	CloudProvider = "crc"
 
+	// Product indicates that the RH Product is CRC.
+	Product = "crc"
+
 	// Region indicates that the region used is just a CRC.
 	Region = "local"
 
@@ -145,6 +148,7 @@ func (m *Provider) LaunchCluster(clusterName string) (string, error) {
 		State(spi.ClusterStateReady).
 		Version(CRCVersion).
 		CloudProvider(CloudProvider).
+		Product(Product).
 		Region(Region).
 		ExpirationTimestamp(time.Now()).
 		Flavour(version.GetCRCVersion()).
@@ -210,7 +214,7 @@ func (m *Provider) ClusterKubeconfig(clusterID string) ([]byte, error) {
 }
 
 // CheckQuota CRCs a check quota operation.
-func (m *Provider) CheckQuota(flavour string) (bool, error) {
+func (m *Provider) CheckQuota(sku string) (bool, error) {
 	if len(m.clusters) > 0 {
 		return false, fmt.Errorf("only one CRC cluster may be used at a time")
 	}
@@ -294,6 +298,11 @@ func getPullSecretFileContent() (string, error) {
 // ExtendExpiry CRCs an extend cluster expiry operation.
 func (m *Provider) ExtendExpiry(clusterID string, hours uint64, minutes uint64, seconds uint64) error {
 	return fmt.Errorf("ExtendExpiry is unsupported by CRC clusters")
+}
+
+// Expire CRCs an extend cluster expiry operation.
+func (m *Provider) Expire(clusterID string) error {
+	return fmt.Errorf("Expire is unsupported by CRC clusters")
 }
 
 // AddProperty CRCs an add new cluster property operation.
